@@ -93,13 +93,12 @@ def _ensure_rust_installed() -> bool:
 
 
 def _ensure_indexer_built() -> bool:
-    """Build wells-index if not already installed.
+    """Build wells-index if not already installed. Silent on failure.
 
     Returns True if indexer is available (either already installed or successfully built).
     """
     try:
         import wells_index  # noqa: F401
-        console.print("[green]✓ Indexer already available[/green]")
         return True
     except ImportError:
         pass
@@ -109,62 +108,44 @@ def _ensure_indexer_built() -> bool:
     indexer_dir = wells_root / "wells-index"
 
     if not indexer_dir.exists():
-        console.print("[red]ERROR: wells-index source not found at {indexer_dir}[/red]")
         return False
 
-    console.print("[cyan]Building indexer (first time only, this may take a minute)...[/cyan]")
-
     try:
-        # Install maturin first
-        console.print("[dim]Installing maturin...[/dim]")
+        # Try maturin develop (preferred)
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-q", "maturin"],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if result.returncode != 0:
-            console.print(f"[red]Failed to install maturin: {result.stderr[:200]}[/red]")
-            return False
-
-        # Build with maturin (show output for debugging)
-        console.print("[dim]Compiling Rust extension...[/dim]")
-        result = subprocess.run(
-            ["maturin", "develop", "-q"],
+            ["maturin", "develop"],
             cwd=str(indexer_dir),
-            env={**os.environ, "UV_LINK_MODE": "copy"},
+            capture_output=True,
             text=True,
             timeout=600,
         )
 
-        if result.returncode != 0:
-            console.print(f"[red]Indexer build failed with exit code {result.returncode}[/red]")
-            console.print("[yellow]Trying alternative build method...[/yellow]")
-            # Try pip install -e as fallback
-            result = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-e", str(indexer_dir)],
-                capture_output=True,
-                text=True,
-                timeout=600,
-            )
-            if result.returncode != 0:
-                console.print(f"[red]Build failed: {result.stderr[:500]}[/red]")
-                return False
+        if result.returncode == 0:
+            try:
+                import wells_index  # noqa: F401
+                return True
+            except ImportError:
+                pass
 
-        # Verify it worked
-        try:
-            import wells_index  # noqa: F401
-            console.print("[green]✓ Indexer built and installed successfully[/green]")
-            return True
-        except ImportError:
-            console.print("[red]Build succeeded but indexer still not importable[/red]")
-            return False
+        # Fallback: use uv pip (if available in uv tool context)
+        result = subprocess.run(
+            ["uv", "pip", "install", "-e", str(indexer_dir)],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
 
-    except subprocess.TimeoutExpired:
-        console.print("[red]Indexer build timed out (>10min)[/red]")
+        if result.returncode == 0:
+            try:
+                import wells_index  # noqa: F401
+                return True
+            except ImportError:
+                pass
+
         return False
-    except Exception as e:
-        console.print(f"[red]Error building indexer: {e}[/red]")
+
+    except Exception:
+        # Silent failure
         return False
 
 
@@ -215,39 +196,39 @@ def _auto_index_workspace(workspace: str) -> bool:
 
 
 def first_run_setup() -> None:
-    """Run setup on first use: install Rust, build indexer, ask for workspace, auto-index."""
-    from coding_harness import config
+    """Run setup on first use: install Rust, build indexer, ask for workspace, auto-index.
 
-    # Check if already set up (workspace defined, indexer available)
-    if config.WORKSPACE_ROOT != os.getcwd():
-        # Workspace already configured
-        return
-
-    # Ensure Rust is installed
-    rust_ok = _ensure_rust_installed()
-    if not rust_ok:
-        console.print("[yellow]Rust toolchain required. Skipping indexer setup.[/yellow]")
-        return
-
-    # Try to build indexer
-    indexer_ok = _ensure_indexer_built()
-    if not indexer_ok:
-        console.print("[yellow]Indexer not available. Using grep for code search.[/yellow]")
-        return
-
-    # Prompt for workspace
-    workspace = _prompt_for_workspace()
-    if not workspace:
-        return
-
-    # Save to .env
+    Silently degrades if any step fails. System works without indexer (grep fallback).
+    """
     try:
-        from coding_harness import settings
-        settings.update_env_file(Path(".env"), {"WORKSPACE_ROOT": workspace})
-        os.environ["WORKSPACE_ROOT"] = workspace
-    except Exception as e:
-        console.print(f"[yellow]Could not save workspace to .env: {e}[/yellow]")
+        from coding_harness import config
 
-    # Auto-index
-    _auto_index_workspace(workspace)
-    console.print()
+        # Check if already set up (workspace defined, indexer available)
+        if config.WORKSPACE_ROOT != os.getcwd():
+            # Workspace already configured
+            return
+
+        # Try to build indexer (silently, no error messages)
+        if not _ensure_indexer_built():
+            # Indexer build failed, but system still works with grep
+            return
+
+        # Prompt for workspace (only if indexer succeeded)
+        workspace = _prompt_for_workspace()
+        if not workspace:
+            return
+
+        # Save to .env
+        try:
+            from coding_harness import settings
+            settings.update_env_file(Path(".env"), {"WORKSPACE_ROOT": workspace})
+            os.environ["WORKSPACE_ROOT"] = workspace
+        except Exception:
+            pass
+
+        # Auto-index
+        _auto_index_workspace(workspace)
+        console.print()
+    except Exception:
+        # Silent failure - system continues with grep fallback
+        pass
