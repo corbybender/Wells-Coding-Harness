@@ -215,6 +215,13 @@ def _print_usage() -> None:
 
 
 def main() -> None:
+    # Auto-setup on first run (build indexer, prompt for workspace, index)
+    try:
+        from coding_harness import setup
+        setup.first_run_setup()
+    except Exception:
+        pass  # Setup is optional; continue even if it fails
+
     argv = list(sys.argv[1:])
 
     # --version short-circuits everything.

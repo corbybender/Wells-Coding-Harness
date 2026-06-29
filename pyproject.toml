@@ -13,9 +13,6 @@ dependencies = [
     "rich>=15.0.0",
 ]
 
-[project.optional-dependencies]
-index = ["wells-index>=0.1.0"]
-
 [project.scripts]
 coding-harness = "coding_harness.main:main"
 coding-harness-mcp = "coding_harness.mcp_server:main"

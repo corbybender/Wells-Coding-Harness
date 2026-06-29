@@ -321,6 +321,13 @@ def _bottom_toolbar():
 
 
 def run_repl() -> None:
+    # Auto-setup on first run
+    try:
+        from coding_harness import setup
+        setup.first_run_setup()
+    except Exception:
+        pass  # Setup is optional
+
     if not _ensure_model_configured():
         return
 
