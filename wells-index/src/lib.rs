@@ -46,7 +46,7 @@ impl IndexEngine {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         Python::with_gil(|py| {
-            let list = pyo3::types::PyList::new_bound(py, Vec::new());
+            let list = pyo3::types::PyList::empty_bound(py);
             for result in results {
                 let dict = pyo3::types::PyDict::new_bound(py);
                 dict.set_item("file_path", result.file_path)?;
@@ -67,7 +67,7 @@ impl IndexEngine {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         Python::with_gil(|py| {
-            let list = pyo3::types::PyList::new_bound(py, Vec::new());
+            let list = pyo3::types::PyList::empty_bound(py);
             for result in results {
                 let dict = pyo3::types::PyDict::new_bound(py);
                 dict.set_item("file_path", result.file_path)?;
@@ -88,7 +88,7 @@ impl IndexEngine {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         Python::with_gil(|py| {
-            let list = pyo3::types::PyList::new_bound(py, Vec::new());
+            let list = pyo3::types::PyList::empty_bound(py);
             for result in results {
                 let dict = pyo3::types::PyDict::new_bound(py);
                 dict.set_item("file_path", result.file_path)?;
@@ -109,7 +109,7 @@ impl IndexEngine {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         Python::with_gil(|py| {
-            let list = pyo3::types::PyList::new_bound(py, Vec::new());
+            let list = pyo3::types::PyList::empty_bound(py);
             for result in results {
                 let dict = pyo3::types::PyDict::new_bound(py);
                 dict.set_item("file_path", result.file_path)?;
@@ -130,7 +130,7 @@ impl IndexEngine {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         Python::with_gil(|py| {
-            let list = pyo3::types::PyList::new_bound(py, Vec::new());
+            let list = pyo3::types::PyList::empty_bound(py);
             for result in results {
                 let dict = pyo3::types::PyDict::new_bound(py);
                 dict.set_item("file_path", result.file_path)?;
