@@ -207,13 +207,21 @@ def first_run_setup() -> None:
     """Run setup on first use: install Rust, build indexer, ask for workspace, auto-index.
 
     Shows diagnostic errors; system still works without indexer (grep fallback).
+    Only runs once (tracked by marker file in ~/.wells/).
     """
     try:
+        # Check if setup has already run (marker file in ~/.wells/)
+        marker_file = Path.home() / ".wells" / ".setup_complete"
+        if marker_file.exists():
+            return
+
         from coding_harness import config
 
         # Check if already set up (workspace defined, indexer available)
         if config.WORKSPACE_ROOT != os.getcwd():
-            # Workspace already configured
+            # Workspace already configured — mark setup as done
+            marker_file.parent.mkdir(parents=True, exist_ok=True)
+            marker_file.touch()
             return
 
         # Try to build indexer
@@ -247,7 +255,19 @@ def first_run_setup() -> None:
         # Auto-index
         _auto_index_workspace(workspace)
         console.print()
+
+        # Mark setup as complete so it doesn't run again
+        marker_file = Path.home() / ".wells" / ".setup_complete"
+        marker_file.parent.mkdir(parents=True, exist_ok=True)
+        marker_file.touch()
     except Exception as e:
         # Unexpected error — show it
         console.print(f"[yellow]Unexpected error during setup: {e}[/yellow]")
         console.print("[yellow]Continuing with indexer unavailable.[/yellow]\n")
+        # Still mark setup as complete so we don't retry on every startup
+        try:
+            marker_file = Path.home() / ".wells" / ".setup_complete"
+            marker_file.parent.mkdir(parents=True, exist_ok=True)
+            marker_file.touch()
+        except Exception:
+            pass
