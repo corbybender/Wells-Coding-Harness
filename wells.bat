@@ -28,7 +28,7 @@ if errorlevel 1 goto :syncfail
 
 :run
 set "PYTHONPATH=%~dp0src;%PYTHONPATH%"
-uv run python -m coding_harness.main %*
+uv run --no-sync python -m coding_harness.main %*
 goto :eof
 
 :syncfail
