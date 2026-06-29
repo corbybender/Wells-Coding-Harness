@@ -20,6 +20,7 @@ class AgentState(TypedDict, total=False):
     workspace_root: str
     safety: str  # auto | approve | dryrun
     plan_mode: bool
+    index_ready: bool  # True when repo index is built/up-to-date
 
     development_plan: str
     architecture: str

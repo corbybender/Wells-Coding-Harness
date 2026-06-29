@@ -15,10 +15,32 @@ from coding_harness.agents.coder import coder
 from coding_harness.agents.planner import planner
 from coding_harness.agents.reviewer import reviewer
 from coding_harness.agents.tester import tester
-from coding_harness.config import MAX_ITERATIONS
+from coding_harness.config import MAX_ITERATIONS, INDEX_AUTO_UPDATE
 from coding_harness.finisher import finisher
 from coding_harness.state import AgentState
 from coding_harness.summarize import summarizer_node
+from coding_harness.tools import ToolContext
+
+
+def indexer_node(state: AgentState) -> AgentState:
+    """Build or update the structural repository index (if available).
+
+    Runs transparently before planning. Sets index_ready=True when complete.
+    If wells-index is not installed or INDEX_AUTO_UPDATE is disabled, this is a no-op.
+    """
+    # Import here to avoid circular dependency and late-bind the availability check
+    from coding_harness import index_tools
+
+    if not INDEX_AUTO_UPDATE or not index_tools.INDEXER_AVAILABLE:
+        return {"index_ready": False}
+
+    try:
+        ctx = ToolContext.from_state(state)
+        result = index_tools.index_workspace(ctx)
+        return {"index_ready": result.ok}
+    except Exception:
+        # If indexing fails, continue anyway (graceful degradation)
+        return {"index_ready": False}
 
 
 def _route_after_review(state: AgentState) -> str:
@@ -39,6 +61,7 @@ def _route_after_review(state: AgentState) -> str:
 def build_graph():
     graph = StateGraph(AgentState)
 
+    graph.add_node("indexer", indexer_node)
     graph.add_node("planner", planner)
     graph.add_node("architect", architect)
     graph.add_node("coder", coder)
@@ -47,7 +70,8 @@ def build_graph():
     graph.add_node("summarizer", summarizer_node)
     graph.add_node("finisher", finisher)
 
-    graph.add_edge(START, "planner")
+    graph.add_edge(START, "indexer")
+    graph.add_edge("indexer", "planner")
     graph.add_edge("planner", "architect")
     graph.add_edge("architect", "coder")
     graph.add_edge("coder", "tester")

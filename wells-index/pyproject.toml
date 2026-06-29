@@ -1,0 +1,30 @@
+[build-system]
+requires = ["maturin>=1.7"]
+build-backend = "maturin"
+
+[project]
+name = "wells-index"
+version = "0.1.0"
+description = "Fast structural repository indexer for wells-coding-harness"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{name = "Wells Contributors", email = "dev@wells.local"}]
+license = {text = "MIT OR Apache-2.0"}
+keywords = ["indexing", "code-search", "tree-sitter", "symbolic", "ast"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=9.1.1", "black>=24.0", "ruff>=0.4"]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+python-source = "python"
+module-name = "wells_index._core"

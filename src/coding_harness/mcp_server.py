@@ -259,6 +259,72 @@ async def handle_list_tools() -> list[types.Tool]:
                 },
             },
         ),
+        types.Tool(
+            name="index_repo",
+            description="Build or update the structural repository index (if wells-index is installed). "
+            "Uses tree-sitter to extract symbols, create a knowledge graph, and store in SQLite. "
+            "Only re-parses changed files. Transparent and fast on incremental runs.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "workspace": {"type": "string", "default": WORKSPACE_ROOT},
+                },
+            },
+        ),
+        types.Tool(
+            name="find_symbol",
+            description="Find definition location(s) for a symbol by exact name. "
+            "Uses the repo index for fast, precise lookups (much faster than grep). "
+            "Returns file path, line numbers, and symbol kind.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Symbol name to find"},
+                    "workspace": {"type": "string", "default": WORKSPACE_ROOT},
+                },
+                "required": ["name"],
+            },
+        ),
+        types.Tool(
+            name="find_references",
+            description="Find all files and lines that reference or call a symbol. "
+            "Includes direct references, function calls, and inheritance relationships.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "Symbol to find references for"},
+                    "workspace": {"type": "string", "default": WORKSPACE_ROOT},
+                },
+                "required": ["symbol"],
+            },
+        ),
+        types.Tool(
+            name="find_callers",
+            description="Find all functions and methods that call a given function. "
+            "Useful for understanding how a function is used across the codebase.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "Function/method name"},
+                    "workspace": {"type": "string", "default": WORKSPACE_ROOT},
+                },
+                "required": ["symbol"],
+            },
+        ),
+        types.Tool(
+            name="search_symbols",
+            description="Prefix/substring search for symbols across the index. "
+            "Returns matching names and their locations.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Prefix or substring to search for"},
+                    "limit": {"type": "integer", "default": 20},
+                    "workspace": {"type": "string", "default": WORKSPACE_ROOT},
+                },
+                "required": ["query"],
+            },
+        ),
     ]
     return core
 
@@ -314,6 +380,16 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
             return _get_harness_info(arguments)
         if name == "get_principles":
             return _get_principles(arguments)
+        if name == "index_repo":
+            return _index_repo(arguments)
+        if name == "find_symbol":
+            return _find_symbol(arguments)
+        if name == "find_references":
+            return _find_references(arguments)
+        if name == "find_callers":
+            return _find_callers(arguments)
+        if name == "search_symbols":
+            return _search_symbols(arguments)
         return _text_content(_format_output(error=f"Unknown tool: {name}"))
     except Exception as exc:
         return _text_content(_format_output(error=f"{type(exc).__name__}: {exc}"))
@@ -586,6 +662,89 @@ def _get_principles(args: dict) -> list[types.TextContent]:
     return _text_content(_format_output(
         source=principles.source_label(ws),
         principles=principles.principles_text(ws),
+    ))
+
+
+def _index_repo(args: dict) -> list[types.TextContent]:
+    """Build or update the repository index."""
+    from coding_harness import index_tools
+
+    if not index_tools.INDEXER_AVAILABLE:
+        return _text_content(_format_output(
+            error="Index engine not available. Install: pip install wells-index"
+        ))
+
+    ctx = _ctx(args)
+    result = index_tools.index_workspace(ctx)
+    return _text_content(_format_output(
+        ok=result.ok,
+        output=result.output,
+        error=result.error,
+    ))
+
+
+def _find_symbol(args: dict) -> list[types.TextContent]:
+    """Find definition(s) for a symbol by exact name."""
+    from coding_harness import index_tools
+
+    if not index_tools.INDEXER_AVAILABLE:
+        return _text_content(_format_output(error="Index engine not available"))
+
+    ctx = _ctx(args)
+    result = index_tools.find_symbol(ctx, args["name"])
+    return _text_content(_format_output(
+        ok=result.ok,
+        output=result.output,
+        error=result.error,
+    ))
+
+
+def _find_references(args: dict) -> list[types.TextContent]:
+    """Find all references to a symbol."""
+    from coding_harness import index_tools
+
+    if not index_tools.INDEXER_AVAILABLE:
+        return _text_content(_format_output(error="Index engine not available"))
+
+    ctx = _ctx(args)
+    result = index_tools.find_references(ctx, args["symbol"])
+    return _text_content(_format_output(
+        ok=result.ok,
+        output=result.output,
+        error=result.error,
+    ))
+
+
+def _find_callers(args: dict) -> list[types.TextContent]:
+    """Find all callers of a function."""
+    from coding_harness import index_tools
+
+    if not index_tools.INDEXER_AVAILABLE:
+        return _text_content(_format_output(error="Index engine not available"))
+
+    ctx = _ctx(args)
+    result = index_tools.find_callers(ctx, args["symbol"])
+    return _text_content(_format_output(
+        ok=result.ok,
+        output=result.output,
+        error=result.error,
+    ))
+
+
+def _search_symbols(args: dict) -> list[types.TextContent]:
+    """Search for symbols by prefix/substring."""
+    from coding_harness import index_tools
+
+    if not index_tools.INDEXER_AVAILABLE:
+        return _text_content(_format_output(error="Index engine not available"))
+
+    ctx = _ctx(args)
+    limit = args.get("limit", 20)
+    result = index_tools.search_symbols(ctx, args["query"], limit)
+    return _text_content(_format_output(
+        ok=result.ok,
+        output=result.output,
+        error=result.error,
     ))
 
 

@@ -1,0 +1,24 @@
+[submodule "wells-index/grammars/python"]
+	path = wells-index/grammars/python
+	url = https://github.com/tree-sitter/tree-sitter-python.git
+[submodule "wells-index/grammars/javascript"]
+	path = wells-index/grammars/javascript
+	url = https://github.com/tree-sitter/tree-sitter-javascript.git
+[submodule "wells-index/grammars/typescript"]
+	path = wells-index/grammars/typescript
+	url = https://github.com/tree-sitter/tree-sitter-typescript.git
+[submodule "wells-index/grammars/go"]
+	path = wells-index/grammars/go
+	url = https://github.com/tree-sitter/tree-sitter-go.git
+[submodule "wells-index/grammars/rust"]
+	path = wells-index/grammars/rust
+	url = https://github.com/tree-sitter/tree-sitter-rust.git
+[submodule "wells-index/grammars/java"]
+	path = wells-index/grammars/java
+	url = https://github.com/tree-sitter/tree-sitter-java.git
+[submodule "wells-index/grammars/c"]
+	path = wells-index/grammars/c
+	url = https://github.com/tree-sitter/tree-sitter-c.git
+[submodule "wells-index/grammars/cpp"]
+	path = wells-index/grammars/cpp
+	url = https://github.com/tree-sitter/tree-sitter-cpp.git

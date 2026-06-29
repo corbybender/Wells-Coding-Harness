@@ -156,6 +156,52 @@ def _reload_module_config() -> None:
     importlib.reload(config)
 
 
+def _run_index_cmd(args: list[str]) -> None:
+    """Handle `wells index` subcommand (build/update/status/clear)."""
+    from coding_harness import index_tools
+    from coding_harness.tools import ToolContext
+
+    if not index_tools.INDEXER_AVAILABLE:
+        print("ERROR: Index engine not available. Install: pip install wells-index")
+        sys.exit(1)
+
+    ctx = ToolContext(workspace=config.WORKSPACE_ROOT)
+
+    if not args or args[0] in ("build", "update", ""):
+        # Build/update the index
+        print(f"Indexing {config.WORKSPACE_ROOT}...")
+        result = index_tools.index_workspace(ctx)
+        if result.ok:
+            print(result.output)
+        else:
+            print(f"ERROR: {result.error or result.output}")
+            sys.exit(1)
+    elif args[0] == "--status":
+        # Show index statistics
+        print("Repository index statistics:")
+        result = index_tools.list_symbols(ctx, "")
+        if result.ok:
+            print(result.output)
+        else:
+            print(f"ERROR: {result.error or result.output}")
+            sys.exit(1)
+    elif args[0] == "--clear":
+        # Clear the index
+        print(f"Clearing index at {config.WORKSPACE_ROOT}...")
+        try:
+            from wells_index import IndexEngine
+            engine = IndexEngine(config.WORKSPACE_ROOT)
+            engine.clear()
+            print("Index cleared.")
+        except Exception as e:
+            print(f"ERROR: Could not clear index: {e}")
+            sys.exit(1)
+    else:
+        print(f"ERROR: Unknown index subcommand: {args[0]}")
+        print("Usage: wells index [--status|--clear]")
+        sys.exit(2)
+
+
 def _print_usage() -> None:
     print(__doc__)
     print(
@@ -247,6 +293,10 @@ def main() -> None:
         print(f"\nPrinciples source: {principles.source_label(ws)}")
         print("-" * 60)
         print(principles.principles_text(ws))
+        return
+    if remaining and remaining[0] == "index":
+        # Build or manage the repository index.
+        _run_index_cmd(remaining[1:])
         return
 
     # ---- Pass 3: a goal run — separate goal args from KEY=VALUE overrides ----

@@ -129,6 +129,10 @@ PLAN_MODE: bool = os.getenv("PLAN_MODE", "0") not in ("0", "false", "no", "")
 # Stream output to the console during generation if the model supports it.
 STREAM_OUTPUT: bool = os.getenv("STREAM_OUTPUT", "1") not in ("0", "false", "no", "")
 
+# Auto-build/update the structural repo index before each harness run (if available).
+# Set to 0 to disable automatic indexing.
+INDEX_AUTO_UPDATE: bool = os.getenv("INDEX_AUTO_UPDATE", "1") not in ("0", "false", "no", "")
+
 # Commands blocked from run_command regardless of safety policy (regex patterns,
 # ``|``-separated — each piece is compiled independently).
 BLOCKED_COMMANDS: tuple[str, ...] = tuple(
