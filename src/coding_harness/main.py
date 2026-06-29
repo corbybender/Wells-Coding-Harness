@@ -228,19 +228,19 @@ def main() -> None:
         _reload_module_config()
 
     # ---- Pass 2: subcommand detection on what's left ----
-    if not remaining or remaining[0] in ("-h", "--help", "help"):
+    if remaining and remaining[0] in ("-h", "--help", "help"):
         _print_usage()
         return
-    if remaining[0] == "config":
+    if remaining and remaining[0] == "config":
         settings.interactive_menu(Path(".env"))
         return
-    if remaining[0] == "info":
+    if remaining and remaining[0] == "info":
         # Apply any inline KEY=VALUE overrides first, then show.
         settings.parse_argv_settings(remaining[1:])
         _reload_module_config()
         _print_info()
         return
-    if remaining[0] == "principles":
+    if remaining and remaining[0] == "principles":
         # Show which AGENT.md principles are active (and where they come from).
         from coding_harness import principles
         ws = config.WORKSPACE_ROOT
