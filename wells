@@ -7,9 +7,11 @@
 #   ./wells config                        # interactive settings menu
 #   ./wells info                          # show configuration
 #
-# This is just a thin wrapper around `uv run coding-harness` so the venv is
-# created automatically and the right entry point is used. Once you run it
-# once, `uv` caches the environment and subsequent runs are fast.
+# This wrapper handles the venv automatically. It deliberately AVOIDS building
+# the local package (which would need hatchling from PyPI) by running the
+# harness module directly with PYTHONPATH=src. It also forces UV_NATIVE_TLS=1
+# so uv uses the system certificate store — needed on corporate networks whose
+# proxy presents a self-signed cert that Python's bundled certifi rejects.
 
 set -e
 
@@ -17,8 +19,21 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Make sure dependencies are installed (no-op if already done; fast after first run).
-uv sync --quiet 2>/dev/null || uv sync
+# Use the OS certificate store so corporate TLS-intercepting proxies work.
+export UV_NATIVE_TLS="${UV_NATIVE_TLS:-1}"
 
-# Forward all arguments to the harness.
-exec uv run coding-harness "$@"
+# Sync dependencies WITHOUT building the local package. --no-install-project
+# means uv never invokes the build backend (hatchling), so no PyPI fetch is
+# needed for the build step. Deps are pre-built wheels.
+if ! uv sync --no-install-project --quiet 2>/dev/null; then
+    echo "[wells] installing dependencies (first run may take a minute) ..."
+    uv sync --no-install-project || {
+        echo "[wells] dependency install failed. Check your network/TLS settings." >&2
+        echo "[wells] If behind a proxy, try: set SSL_CERT_FILE= and REQUESTS_CA_BUNDLE=" >&2
+        exit 1
+    }
+fi
+
+# Run the harness directly from src/ — no package build, no install step.
+export PYTHONPATH="$SCRIPT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+exec uv run python -m coding_harness.main "$@"
