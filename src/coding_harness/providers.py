@@ -266,6 +266,14 @@ def _build_chat_model(profile: ProviderProfile, *, temperature: float, timeout: 
             kwargs["base_url"] = profile.base_url
         kwargs["timeout"] = timeout
         kwargs["max_retries"] = 0  # we run our own backoff in config._invoke_with_retry
+        # Use certifi CA bundle for SSL on Windows (httpx doesn't use system store).
+        try:
+            import certifi
+            import httpx
+            kwargs["http_client"] = httpx.Client(verify=certifi.where())
+            kwargs["http_async_client"] = httpx.AsyncClient(verify=certifi.where())
+        except Exception:
+            pass
     elif kind == "anthropic":
         if profile.api_key:
             kwargs["api_key"] = profile.api_key

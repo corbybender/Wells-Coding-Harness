@@ -18,20 +18,18 @@ from langchain_core.messages import HumanMessage
 def _configure_ca_bundle() -> None:
     """Point OpenSSL at a usable CA bundle.
 
-    uv's standalone CPython builds ship their own OpenSSL which, on some Linux
-    systems, has no default CA file (``ssl.get_default_verify_paths().cafile``
-    is None), causing ``CERTIFICATE_VERIFY_FAILED`` on every HTTPS call. We fix
-    this by exporting ``SSL_CERT_FILE``/``SSL_CERT_DIR`` to the first bundle we
-    can find (system bundle, then certifi's). A user-provided value wins.
+    On Windows, Python's OpenSSL doesn't use the Windows certificate store by
+    default, so HTTPS calls can fail with certificate errors. We use certifi's
+    bundle which ships with pip and always works cross-platform.
     """
     if os.environ.get("SSL_CERT_FILE"):
         return
 
+    # On Linux/macOS try system bundles first.
     candidates = [
         "/etc/ssl/certs/ca-certificates.crt",  # Debian/Ubuntu/WSL
         "/etc/pki/tls/certs/ca-bundle.crt",  # RHEL/Fedora
         "/etc/ssl/cert.pem",  # Alpine/macOS
-        "/etc/ssl/certs",  # capath fallback
     ]
     for path in candidates:
         if os.path.exists(path):
@@ -40,12 +38,13 @@ def _configure_ca_bundle() -> None:
             os.environ.setdefault("CURL_CA_BUNDLE", path)
             return
 
+    # Always fall back to certifi (works on Windows + any platform).
     try:
         import certifi
-
-        os.environ["SSL_CERT_FILE"] = certifi.where()
-        os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
-        os.environ.setdefault("CURL_CA_BUNDLE", certifi.where())
+        bundle = certifi.where()
+        os.environ["SSL_CERT_FILE"] = bundle
+        os.environ["REQUESTS_CA_BUNDLE"] = bundle
+        os.environ["CURL_CA_BUNDLE"] = bundle
     except Exception:
         pass
 
