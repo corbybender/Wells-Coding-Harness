@@ -562,10 +562,21 @@ class WellsApp(App[None]):
                 intent = chat.classify_intent(text)
 
             from coding_harness.cli import StreamingCallback, _run_simple
+            from coding_harness.chat import needs_escalation
             callbacks = [StreamingCallback()]
 
             if intent == "chat":
-                _run_chat(text, callbacks)
+                reply = _run_chat(text, callbacks)
+                # If the chat LLM signalled it needs tools, auto-escalate.
+                if reply and needs_escalation(reply):
+                    self.call_from_thread(
+                        self.write_log,
+                        "[dim]Auto-escalating to task mode…[/dim]",
+                    )
+                    _run_task(text, self._agent_state, self._graph_app, callbacks)
+                    _REPL_STATE["memory"].set_run_summary(
+                        _summarize_run(_REPL_STATE.get("last_state", {}))
+                    )
             elif intent == "simple":
                 _run_simple(text, self._agent_state, callbacks)
             else:
@@ -628,4 +639,4 @@ def run_tui(resume_context: str | None = None) -> None:
     if not _ensure_model_configured():
         return
 
-    WellsApp(resume_context=resume_context).run()
+    WellsApp(resume_context=resume_context).run(mouse=False)

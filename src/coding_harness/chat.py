@@ -220,6 +220,21 @@ _TASK_SIGNALS = (
     "set up",
     "setup",
     "configure",
+    # Verbs commonly missed that imply action on files/systems:
+    "send",
+    "push",
+    "publish",
+    "upload",
+    "submit",
+    "run",
+    "execute",
+    "launch",
+    "start",
+    "stop",
+    "restart",
+    "open",
+    "read and",   # "read X and do Y" is always a task
+    "check and",  # "check X and do Y"
 )
 
 # Reference to prior work — strong signal this is a follow-up question, not a
@@ -309,10 +324,13 @@ def _heuristic_classify(text: str) -> Intent | None:
     looks_like_question = bool(_QUESTION_HINTS_RE.search(stripped))
 
     # A question about prior work ("did you make the fix?") → chat.
+    # Exception: "can you please send/push/deploy this" has a followup word ("this")
+    # but is clearly a task — let the task-signal check win in that case.
     if has_followup and (
         has_question_mark or starts_with_question or looks_like_question
     ):
-        return "chat"
+        if not (has_task_signal and _imperative_after_please(stripped)):
+            return "chat"
 
     # "how do I fix X" / "why does X fail" — asking, not instructing.
     if looks_like_question and not _imperative(stripped):
@@ -348,14 +366,32 @@ def _imperative(text: str) -> bool:
     return first in _TASK_SIGNALS
 
 
+_POLITE_PREFIXES = (
+    "can you please ", "can you ", "could you please ", "could you ",
+    "would you please ", "would you ", "will you ", "please ",
+)
+
+
 def _imperative_after_please(text: str) -> bool:
-    """True for 'please <task-verb> ...' / 'can you <task-verb> ...'."""
+    """True when a polite task request like 'can you [please] X' contains a task verb.
+
+    Checks both the immediate first verb AND any task verb anywhere in the
+    message, because requests like 'can you please read X and send Y' have
+    the task verb ("send") after a non-task opener ("read").
+    """
     lower = text.lower().lstrip()
-    for lead in ("please ", "can you ", "could you ", "would you ", "will you "):
+    for lead in _POLITE_PREFIXES:
         if lower.startswith(lead):
-            rest = lower[len(lead) :].lstrip()
+            rest = lower[len(lead):].lstrip()
+            if rest.startswith("please "):
+                rest = rest[7:].lstrip()
+            # Check first verb directly after the prefix.
             first = rest.split(None, 1)[0].rstrip(",.:!") if rest else ""
             if first in _TASK_SIGNALS:
+                return True
+            # Also check anywhere in the full message — handles "can you read X
+            # and send Y" where the task verb comes after a non-task opener.
+            if _TASK_SIGNAL_RE.search(lower):
                 return True
     return False
 
@@ -486,15 +522,31 @@ class ConversationMemory:
 # Conversational reply
 # ---------------------------------------------------------------------------
 
+# Marker the chat LLM outputs when it recognises the request needs tool use.
+# The calling code detects this and auto-escalates to task mode.
+ESCALATE_MARKER = "<<NEEDS_TASK>>"
+
 _CHAT_SYSTEM_BASE = (
     "You are Wells, a concise, helpful coding assistant chatting with the user "
     "in an interactive REPL. Answer the user's question directly and briefly. "
-    "You are NOT in agentic mode — do not claim to run tools or edit files. "
-    "If the user is actually asking you to perform a coding task (create, fix, "
-    "refactor, build something), tell them to phrase it as a task or use the "
-    "/task command so the full agent loop can run. Be honest about what the "
-    "last agent run did or did not accomplish based on the provided context."
+    "You are NOT in agentic mode — you cannot run tools, read files, or edit code "
+    "in this turn.\n\n"
+    "IMPORTANT — if the user is asking you to DO something that requires reading "
+    "files, running commands, editing code, deploying, pushing, building, or any "
+    "other action in the workspace, output ONLY this marker on the very first line "
+    "of your response, then give a one-sentence description of what you will do:\n"
+    f"    {ESCALATE_MARKER}\n"
+    "The system will automatically re-run the request in task mode — do NOT tell "
+    "the user to retype their message or switch modes manually.\n\n"
+    "For actual questions, explanations, or follow-ups about past runs: answer "
+    "directly without the marker. Be honest about what the last agent run did or "
+    "did not accomplish based on the provided context."
 )
+
+
+def needs_escalation(reply: str) -> bool:
+    """True when the chat LLM signalled that this request needs task mode."""
+    return ESCALATE_MARKER in reply
 
 
 def _build_chat_system() -> str:

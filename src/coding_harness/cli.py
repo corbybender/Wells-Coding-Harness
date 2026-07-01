@@ -317,16 +317,18 @@ def run_repl(resume_context: str | None = None) -> None:
     run_tui(resume_context=resume_context)
 
 
-def _run_chat(text: str, callbacks) -> None:
-    """Answer ``text`` directly without the agent loop (streamed)."""
-    # If resume context is loaded, inject into chat memory so every chat turn
-    # in this session is aware of what the previous session did.  Don't pop it
-    # here — the task runner pops it when it needs to prepend it to the goal.
+def _run_chat(text: str, callbacks) -> str | None:
+    """Answer ``text`` directly without the agent loop (streamed).
+
+    Returns the reply text so the caller can check for escalation signals.
+    Returns None on error.
+    """
     resume_ctx = _REPL_STATE.get("resume_context")
     if resume_ctx:
         _REPL_STATE["memory"].set_run_summary(resume_ctx)
 
-    console.print()  # blank line before streamed output
+    console.print()
+    reply: str | None = None
     try:
         reply = chat.conversational_reply(
             text,
@@ -341,6 +343,7 @@ def _run_chat(text: str, callbacks) -> None:
         console.print(f"\n[bold red]Error:[/bold red] {type(e).__name__}: {e}")
         console.print(f"[dim]Full details logged to: {log_path()}[/dim]")
     console.print()
+    return reply
 
 
 def _stream_token(token: str) -> None:
