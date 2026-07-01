@@ -133,7 +133,7 @@ WORKSPACE_ROOT: str = os.getenv("WORKSPACE_ROOT", os.getcwd()).strip() or os.get
 HARNESS_SAFETY: str = os.getenv("HARNESS_SAFETY", "auto").strip().lower() or "auto"
 
 # Max tool-call steps in a single executor run before the loop is forced to stop.
-MAX_TOOL_STEPS: int = int(os.getenv("MAX_TOOL_STEPS", "25"))
+MAX_TOOL_STEPS: int = int(os.getenv("MAX_TOOL_STEPS", "60"))
 
 # Max seconds for a single shell command run by the harness.
 SHELL_TIMEOUT: float = float(os.getenv("SHELL_TIMEOUT", "120"))
