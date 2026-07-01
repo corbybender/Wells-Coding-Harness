@@ -27,6 +27,15 @@ uv sync --no-install-project
 if errorlevel 1 goto :syncfail
 
 :run
+REM Auto-deploy the wells-index .pyd from the repo into the venv.
+REM After a git pull the repo copy is newer; this keeps the venv in sync
+REM without any manual copy step.
+set "PYD_SRC=%~dp0wells-index\python\wells_index\_core.cp312-win_amd64.pyd"
+set "PYD_DST=%~dp0.venv\Lib\site-packages\wells_index\_core.cp312-win_amd64.pyd"
+if exist "%PYD_SRC%" (
+    xcopy /Y /Q "%PYD_SRC%" "%PYD_DST%" >nul 2>&1
+)
+
 set "PYTHONPATH=%~dp0src;%PYTHONPATH%"
 uv run --no-sync python -m coding_harness.main %*
 goto :eof

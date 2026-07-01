@@ -201,6 +201,7 @@ dependencies = [
     { name = "prompt-toolkit" },
     { name = "python-dotenv" },
     { name = "rich" },
+    { name = "wells-index" },
 ]
 
 [package.dev-dependencies]
@@ -216,6 +217,7 @@ requires-dist = [
     { name = "prompt-toolkit", specifier = ">=3.0.52" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "rich", specifier = ">=15.0.0" },
+    { name = "wells-index", specifier = ">=0.1.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -1522,6 +1524,17 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/86/eb/20b6cdf273913d0ad05a6a14aed4b9a85591c18a987a3d47f20fa13dcc47/websockets-15.0.1-cp313-cp313-win32.whl", hash = "sha256:ba9e56e8ceeeedb2e080147ba85ffcd5cd0711b89576b83784d8605a7df455fa", size = 176393, upload-time = "2025-03-05T20:02:53.814Z" },
     { url = "https://files.pythonhosted.org/packages/1b/6c/c65773d6cab416a64d191d6ee8a8b1c68a09970ea6909d16965d26bfed1e/websockets-15.0.1-cp313-cp313-win_amd64.whl", hash = "sha256:e09473f095a819042ecb2ab9465aee615bd9c2028e4ef7d933600a8401c79561", size = 176837, upload-time = "2025-03-05T20:02:55.237Z" },
     { url = "https://files.pythonhosted.org/packages/fa/a8/5b41e0da817d64113292ab1f8247140aac61cbf6cfd085d6a0fa77f4984f/websockets-15.0.1-py3-none-any.whl", hash = "sha256:f7a866fbc1e97b5c617ee4116daaa09b722101d4a3c170c787450ba409f9736f", size = 169743, upload-time = "2025-03-05T20:03:39.41Z" },
+]
+
+[[package]]
+name = "wells-index"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a8/34/8b64030b7779d979168d26a89cbfee649b6ef137de01f3ea329591de4f5c/wells_index-0.1.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:a2dc3498db3a3914c0ca983afac412133ac5b34556926ff6a1422746e782e9d5", size = 1193509, upload-time = "2026-06-29T16:01:11.792Z" },
+    { url = "https://files.pythonhosted.org/packages/76/b7/2edd088fcc9f4c1602d4105fcd8e15401b28ec4023bafdcc1b08569d2bfe/wells_index-0.1.0-cp312-cp312-manylinux_2_34_x86_64.whl", hash = "sha256:16de28fca10efa0da7be0a49bc8c941bb28b9969d86fbe822cebd8e6d62100b6", size = 1364150, upload-time = "2026-06-29T16:01:13.049Z" },
+    { url = "https://files.pythonhosted.org/packages/83/59/2a9c9229402aa102d703f96be99da4ff0f78bfda41bebd92cb3d16fb97b9/wells_index-0.1.0-cp312-cp312-win_amd64.whl", hash = "sha256:7c67f8561fb95c94dc61a3c8b7262154eb570deb45700490c8af40151ec58962", size = 1129327, upload-time = "2026-06-29T16:01:14.055Z" },
+    { url = "https://files.pythonhosted.org/packages/9f/6c/9f710820e40644a07e76505e9108d0dada2ca81f417c98f9abdb097529ca/wells_index-0.1.0-cp313-cp313-win_amd64.whl", hash = "sha256:b760f88be5f50f7639a40676e4a13e892584a765c792d5a54eb1fdb82c36d304", size = 1126961, upload-time = "2026-06-29T15:55:37.601Z" },
 ]
 
 [[package]]
