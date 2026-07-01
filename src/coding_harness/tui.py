@@ -25,8 +25,8 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
-from textual.suggester import SuggestFromList
-from textual.widgets import Input, RichLog, Static
+from textual.widgets import Input, OptionList, RichLog, Static
+from textual.widgets._option_list import Option
 
 from coding_harness import chat, config
 from coding_harness.tokens import LEDGER
@@ -50,6 +50,16 @@ Screen {
 #bottom {
     height: 4;
     dock: bottom;
+}
+
+#command-list {
+    display: none;
+    height: auto;
+    max-height: 14;
+    border: solid $accent 50%;
+    background: $surface-darken-1;
+    dock: bottom;
+    margin-bottom: 4;
 }
 
 #input {
@@ -245,19 +255,17 @@ class WellsApp(App[None]):
     # ------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        from coding_harness.cli import SLASH_COMMANDS
-        commands = [cmd for cmd, _, _ in SLASH_COMMANDS]
         yield RichLog(
             id="output",
             markup=True,
             highlight=True,
             wrap=True,
         )
+        yield OptionList(id="command-list")
         with Vertical(id="bottom"):
             yield Input(
                 placeholder="Ask a question or give a task… (/ for commands, Ctrl+C to quit)",
                 id="input",
-                suggester=SuggestFromList(commands, case_sensitive=False),
             )
             yield StatusBar()
 
@@ -271,6 +279,7 @@ class WellsApp(App[None]):
 
         self._log: RichLog = self.query_one("#output", RichLog)
         self._input: Input = self.query_one("#input", Input)
+        self._cmdlist: OptionList = self.query_one("#command-list", OptionList)
 
         # Initialize shared REPL state.
         _REPL_STATE["memory"] = chat.ConversationMemory()
@@ -339,7 +348,43 @@ class WellsApp(App[None]):
     # Input handling
     # ------------------------------------------------------------------
 
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """Show/hide the command popup as the user types."""
+        from coding_harness.cli import SLASH_COMMANDS
+        value = event.value
+        if value.startswith("/"):
+            matches = [
+                (cmd, short) for cmd, short, _ in SLASH_COMMANDS
+                if cmd.startswith(value)
+            ]
+            self._cmdlist.clear_options()
+            for cmd, short in matches:
+                self._cmdlist.add_option(Option(f"{cmd}  [dim]{short}[/dim]", id=cmd))
+            self._cmdlist.display = bool(matches)
+        else:
+            self._cmdlist.display = False
+
+    def on_key(self, event) -> None:
+        """Arrow-down from input moves focus into the command list."""
+        if event.key == "down" and self._cmdlist.display and self.focused is self._input:
+            self._cmdlist.focus()
+            event.stop()
+        elif event.key == "escape" and self._cmdlist.display:
+            self._cmdlist.display = False
+            self._input.focus()
+            event.stop()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        """Fill the input with the selected command and return focus."""
+        cmd = event.option_id or ""
+        if cmd:
+            self._input.value = cmd + " "
+            self._input.cursor_position = len(self._input.value)
+        self._cmdlist.display = False
+        self._input.focus()
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._cmdlist.display = False
         text = event.value.strip()
         self._input.clear()
         if not text:
