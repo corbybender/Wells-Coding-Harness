@@ -25,21 +25,42 @@ def _print_section(title: str, body: str) -> None:
 
 
 def _print_final_summary(state: dict) -> None:
-    _print_section("DEVELOPMENT PLAN", state.get("development_plan", ""))
-    _print_section("ARCHITECTURE PROPOSAL", state.get("architecture", ""))
-    _print_section("IMPLEMENTATION STEPS", state.get("implementation_steps", ""))
-    _print_section("TEST PLAN", state.get("test_plan", ""))
-    _print_section("REVIEW RESULT", state.get("review_result", ""))
+    complete = state.get("review_complete", False)
+    iterations = state.get("iteration", 0)
+    max_iter = state.get("max_iterations", config.MAX_ITERATIONS)
+    status = "COMPLETE" if complete else f"INCOMPLETE (stopped after {iterations}/{max_iter} iterations)"
 
-    status = "COMPLETE" if state.get("review_complete") else "INCOMPLETE"
-    summary = (
-        f"Goal: {state.get('goal', '')}\n"
-        f"Status: {status}\n"
-        f"Iterations used: {state.get('iteration', 0)} / "
-        f"{state.get('max_iterations', config.MAX_ITERATIONS)}\n"
-        f"Model: {config.model_name_for_task('coding')}"
-    )
-    _print_section("FINAL SUMMARY", summary)
+    bar = "=" * 70
+    print(f"\n{bar}")
+    print(f"  {status}")
+    print(bar)
+
+    # Git result (set by finisher node)
+    git = state.get("git_summary", "")
+    if git:
+        print(f"\n  Changes: {git}")
+
+    # What the coder actually did — first 800 chars is usually enough
+    impl = (state.get("implementation_steps") or "").strip()
+    if impl:
+        preview = impl[:800] + (" …(truncated)" if len(impl) > 800 else "")
+        print(f"\n  What was done:\n{_indent(preview, 4)}")
+
+    # Reviewer feedback — only meaningful lines, capped at 15
+    review = (state.get("review_result") or "").strip()
+    if review:
+        lines = [ln for ln in review.splitlines() if ln.strip()]
+        shown = "\n".join(lines[:15])
+        if len(lines) > 15:
+            shown += f"\n  … ({len(lines) - 15} more lines)"
+        print(f"\n  Reviewer notes:\n{_indent(shown, 4)}")
+
+    print(bar)
+
+
+def _indent(text: str, spaces: int) -> str:
+    pad = " " * spaces
+    return "\n".join(pad + ln for ln in text.splitlines())
 
 
 def _print_info() -> None:
@@ -117,7 +138,18 @@ def _run_goal(goal: str) -> None:
 
     final_state = app.invoke(initial_state)
     _print_final_summary(final_state)
-    print("\n" + LEDGER.format_report())
+
+    # Token report: one-line summary; full table only when WELLS_TOKEN_REPORT=1.
+    t = LEDGER.totals()
+    total = t["input"] + t["output"]
+    print(
+        f"\n[tokens] {total:,} total "
+        f"({t['input']:,} in / {t['output']:,} out) across {t['calls']} calls"
+        + (f", {t['cache_read']:,} cache hits" if t["cache_read"] else "")
+        + (" — set WELLS_TOKEN_REPORT=1 for full breakdown" if total > 50_000 else "")
+    )
+    if os.environ.get("WELLS_TOKEN_REPORT") == "1":
+        print("\n" + LEDGER.format_report())
 
 
 def _ensure_model_configured() -> bool:

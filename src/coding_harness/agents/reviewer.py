@@ -28,15 +28,20 @@ TESTER'S REPORT (test results):
 VERIFY BY DOING, not by trusting the claims:
 1. Read the files the coder claims to have changed; confirm the changes exist
    and are correct.
-2. Run the test suite (run_tests) and any relevant lint/build (run_command).
+2. If a test suite is available, run it. If running commands fails (no runner,
+   browser-only UI, missing runtime), skip command verification and verify by
+   reading the code. DO NOT mark INCOMPLETE just because run_command failed.
 3. Check edge cases the coder may have missed.
+
+Mark COMPLETE when the changed code plausibly implements the goal, even if you
+cannot run it. Mark INCOMPLETE only when code is genuinely missing or wrong.
 
 Then reply in EXACTLY this format on your FIRST line:
     DECISION: COMPLETE
 or
     DECISION: INCOMPLETE
 followed by a blank line and then your detailed review with specific, actionable
-feedback. Use INCOMPLETE whenever more work is required to satisfy the goal.
+feedback.
 """
 
 
