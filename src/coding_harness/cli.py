@@ -80,6 +80,11 @@ SLASH_COMMANDS: list[tuple[str, str, str]] = [
         "Resume a previous session",
         "Pick a session and load its context for the next task. Usage: /resume [SESSION_ID]",
     ),
+    (
+        "/export",
+        "Export session transcript",
+        "Write the session log to a file. Usage: /export [path] (default: wells-transcript-<ts>.md)",
+    ),
 ]
 
 
@@ -141,6 +146,9 @@ def handle_slash_command(command: str) -> bool:
         _handle_sessions(arg)
     elif cmd == "/resume":
         _handle_resume_cmd(arg)
+    elif cmd == "/export":
+        # Intercepted by the TUI (which owns the transcript) before reaching here.
+        console.print("[yellow]/export is only available inside the TUI.[/yellow]")
     else:
         console.print(f"[red]Unknown command: {command}[/red]")
         console.print("[dim]Type / for a list of commands.[/dim]")
@@ -443,15 +451,44 @@ def _run_task(text: str, agent_state: dict, app, callbacks) -> None:
         console.print("[dim]Continuing from previous session...[/dim]")
     console.print(f"\n[bold]Goal:[/bold] {text}\n")
 
+    from coding_harness.control import CONTROL, RunCancelled
+
     try:
         for update in app.stream(
             agent_state, config={"callbacks": callbacks}, stream_mode="updates"
         ):
+            if CONTROL.cancelled():
+                raise RunCancelled()
+            if config.MAX_RUN_TOKENS:
+                t_ = LEDGER.totals()
+                used_ = t_["input"] + t_["output"]
+                if used_ >= config.MAX_RUN_TOKENS:
+                    console.print(
+                        f"\n[bold red]Token budget reached ({used_:,}/"
+                        f"{config.MAX_RUN_TOKENS:,}) — stopping the run.[/bold red]"
+                    )
+                    break
             for node_name, node_state in update.items():
                 label = _NODE_LABELS.get(node_name, f"[bold]{node_name.title()}…[/bold]")
                 console.print(f"\n{label}")
                 for k, v in node_state.items():
                     agent_state[k] = v
+
+            # Checkpoint after every node: a crash/kill mid-run loses at most
+            # one node's work, and /resume can continue from the last state.
+            try:
+                t_ = LEDGER.totals()
+                save_session(session_id, session_from_final_state(
+                    session_id, original_goal, agent_state,
+                    workspace=config.WORKSPACE_ROOT,
+                    tokens_in=t_["input"],
+                    tokens_out=t_["output"],
+                    duration_seconds=int(_time.time() - t0),
+                    resumed_from=resume_ctx[:80] if resume_ctx else None,
+                    in_progress=True,
+                ))
+            except Exception:
+                pass
 
         _REPL_STATE["last_state"] = dict(agent_state)
         _print_final_summary(agent_state)
@@ -479,6 +516,8 @@ def _run_task(text: str, agent_state: dict, app, callbacks) -> None:
         except Exception as e:
             console.print(f"[dim][session save failed: {e}][/dim]")
 
+    except RunCancelled:
+        console.print("\n[yellow]Task cancelled by user.[/yellow]")
     except Exception as e:
         from coding_harness.logger import log_error
         log_error(f"_run_task failed: {type(e).__name__}: {e}", e)

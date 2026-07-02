@@ -30,6 +30,11 @@ Investigation strategy:
 
 Output format (use these exact headings):
 
+COMPLEXITY: SIMPLE or COMPLEX
+(SIMPLE = a few localized edits in existing files — small fix, rename, add a
+button/flag/log line. COMPLEX = new modules, new APIs, data-model or schema
+changes, cross-component wiring, migrations. When unsure, say COMPLEX.)
+
 ## Summary
 One sentence: what will be done.
 
@@ -74,5 +79,19 @@ def planner(state: dict) -> dict:
     )
 
     plan = result.summary or "(planner produced no output)"
-    print(f"[planner] plan ready ({len(plan)} chars)")
-    return {"development_plan": plan}
+    complexity = _parse_complexity(plan)
+    print(f"[planner] plan ready ({len(plan)} chars, complexity: {complexity})")
+    return {"development_plan": plan, "plan_complexity": complexity}
+
+
+def _parse_complexity(plan: str) -> str:
+    """Read the COMPLEXITY marker from the plan head; default to complex.
+
+    Complex is the safe default — it only costs one extra (cheap) architect
+    call, whereas mis-labelling a complex task as simple skips design review.
+    """
+    for line in plan.strip().splitlines()[:6]:
+        up = line.upper()
+        if "COMPLEXITY" in up:
+            return "simple" if "SIMPLE" in up else "complex"
+    return "complex"

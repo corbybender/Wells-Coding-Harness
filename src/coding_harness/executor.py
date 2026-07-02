@@ -42,6 +42,7 @@ import shutil
 
 from coding_harness import config, tools
 from coding_harness.compress import compress_output
+from coding_harness.control import CONTROL, ui
 from coding_harness.tokens import LEDGER, estimate_tokens
 
 
@@ -132,7 +133,7 @@ class ExecutorResult:
     tool_calls: list[dict] = field(
         default_factory=list
     )  # [{name, args, ok, output_preview}]
-    stopped_reason: str = "done"  # done | max_steps | error
+    stopped_reason: str = "done"  # done | max_steps | error | cancelled | budget
     messages: list[BaseMessage] = field(default_factory=list)
 
 
@@ -720,7 +721,39 @@ def run_executor(
     _read_ranges: dict[str, list[tuple[int, int]]] = {}  # path → [(offset, end), ...]
     _fail_patterns: dict[str, int] = {}                  # command prefix → fail count
 
+    def _stopped(reason: str, summary: str) -> ExecutorResult:
+        return ExecutorResult(
+            summary=summary,
+            steps_taken=steps,
+            tool_calls=history,
+            stopped_reason=reason,
+            messages=messages,
+        )
+
+    budget = config.MAX_RUN_TOKENS
+    budget_warned = False
+
     while steps < cap:
+        # ── Cooperative cancellation (set by the TUI on Escape) ─────────────
+        if CONTROL.cancelled():
+            return _stopped("cancelled", "(cancelled by user)")
+
+        # ── Per-run token budget (ledger is reset at run start) ─────────────
+        if budget:
+            t = LEDGER.totals()
+            used = t["input"] + t["output"]
+            if used >= budget:
+                ui("warn", f"\n[bold red]Token budget reached "
+                           f"({used:,}/{budget:,}) — stopping.[/bold red]")
+                return _stopped(
+                    "budget",
+                    f"(stopped: token budget of {budget:,} reached at {used:,} tokens)",
+                )
+            if not budget_warned and used >= 0.8 * budget:
+                budget_warned = True
+                ui("warn", f"\n[yellow]⚠ {used:,} of {budget:,} run tokens used "
+                           f"({used * 100 // budget}%).[/yellow]")
+
         # ── Context management pipeline (order matters) ──────────────────────
         messages = _inject_wm(messages, wm)
         messages, mask_saved = _apply_observation_masking(messages, _tool_meta)
@@ -731,6 +764,7 @@ def run_executor(
         # ─────────────────────────────────────────────────────────────────────
 
         rounds += 1
+        CONTROL.set_activity(f"thinking · round {rounds} · step {steps}/{cap}")
         try:
             resp = config._invoke_with_retry(llm, messages)
         except Exception as e:
@@ -755,16 +789,16 @@ def run_executor(
             preview = " ".join(llm_text.split())[:200]
             if len(llm_text) > 200:
                 preview += "…"
-            print(f"\n[dim italic]{preview}[/dim italic]")
+            ui("llm_text", f"\n[dim italic]{preview}[/dim italic]")
         elif calls:
             # No narrative text — at least show the round number so the user
             # knows progress is being made.
-            print(f"\n[dim]Round {rounds}  (step {steps + 1}/{cap})[/dim]")
+            ui("round", f"\n[dim]Round {rounds}  (step {steps + 1}/{cap})[/dim]")
 
         if not calls:
             # No tool calls = final answer.
             if llm_text:
-                print()  # blank line before final summary
+                ui("round", "")  # blank line before final summary
             return ExecutorResult(
                 summary=llm_text or "(no output)",
                 steps_taken=steps,
@@ -774,6 +808,8 @@ def run_executor(
             )
 
         for call in calls:
+            if CONTROL.cancelled():
+                return _stopped("cancelled", "(cancelled by user)")
             steps += 1
             name = call.get("name")
             args = call.get("args") or {}
@@ -790,6 +826,7 @@ def run_executor(
 
             _tool_meta[tcid] = (name, args)
 
+            CONTROL.set_activity(f"{name} · step {steps}/{cap}")
             result = tools.dispatch(name, args, ctx)
             obs_text = result.to_model_text()
             wm.update_from_tool(name, args, obs_text, result.ok)
@@ -826,7 +863,7 @@ def run_executor(
                     )
                     obs_text = obs_text + note
                     lbl = "re-reading" if count == 2 else f"reading ×{count}"
-                    print(f"  [yellow]⚠ {lbl} {fpath} — consider grep or find_symbol instead[/yellow]")
+                    ui("warn", f"  [yellow]⚠ {lbl} {fpath} — consider grep or find_symbol instead[/yellow]")
 
             # ── Stuck-loop detection ───────────────────────────────────────
             # Inject a note into obs_text when the same command fails 3+ times
@@ -834,7 +871,7 @@ def run_executor(
             if not result.ok and not result.simulated:
                 err = _first_error_line(result.output or result.error or "")
                 if err:
-                    print(f"    [dim red]↳ {err}[/dim red]")
+                    ui("warn", f"    [dim red]↳ {err}[/dim red]")
 
                 if name in ("run_command", "shell", "bash"):
                     raw_cmd = str(args.get("command") or args.get("cmd") or "")
@@ -847,12 +884,17 @@ def run_executor(
                             f"blocking you and what you have tried so far.]"
                         )
                         obs_text = obs_text + blocker_note
-                        print(
+                        ui(
+                            "warn",
                             f"  [bold yellow]⚠ same command failed {_fail_patterns[key]}× "
-                            f"— model told to report blocker[/bold yellow]"
+                            f"— model told to report blocker[/bold yellow]",
                         )
 
-            print(_activity_line(name, args, result.ok, result.simulated))
+            ui(
+                "tool_line",
+                _activity_line(name, args, result.ok, result.simulated),
+                name=name, ok=result.ok, simulated=result.simulated,
+            )
 
             messages.append(
                 _tool_message(obs_text, tool_call_id=tcid, name=name, ai_message=resp)

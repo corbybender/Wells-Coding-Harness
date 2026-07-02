@@ -23,11 +23,15 @@ class AgentState(TypedDict, total=False):
     index_ready: bool  # True when repo index is built/up-to-date
 
     development_plan: str
+    plan_complexity: str  # "simple" (skip architect) | "complex"
     architecture: str
     implementation_steps: str
     code_changes: str
     test_plan: str
     test_results: str
+    # Deterministic test gate: True/False from actually running the suite;
+    # absent/None when no runnable test setup was detected.
+    tests_passed: bool
     review_result: str
     review_complete: bool
 

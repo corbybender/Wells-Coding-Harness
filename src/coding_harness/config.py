@@ -135,6 +135,11 @@ HARNESS_SAFETY: str = os.getenv("HARNESS_SAFETY", "auto").strip().lower() or "au
 # Max tool-call steps in a single executor run before the loop is forced to stop.
 MAX_TOOL_STEPS: int = int(os.getenv("MAX_TOOL_STEPS", "60"))
 
+# Per-run token budget: hard cap on input+output tokens across one run
+# (all agents combined — the ledger is reset at run start). 0 disables the cap.
+# A warning is printed when a run crosses 80% of the budget.
+MAX_RUN_TOKENS: int = int(os.getenv("MAX_RUN_TOKENS", "0"))
+
 # Max seconds for a single shell command run by the harness.
 SHELL_TIMEOUT: float = float(os.getenv("SHELL_TIMEOUT", "120"))
 

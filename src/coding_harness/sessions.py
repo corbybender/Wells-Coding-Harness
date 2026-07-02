@@ -131,20 +131,36 @@ def session_from_final_state(
     tokens_out: int,
     duration_seconds: int,
     resumed_from: str | None = None,
+    in_progress: bool = False,
 ) -> dict:
-    """Build a session dict from a completed harness run."""
+    """Build a session dict from a harness run.
+
+    With ``in_progress=True`` the session is a mid-run checkpoint: saved after
+    every graph node so a crash/kill loses at most one node's worth of work
+    and ``/resume`` can pick up from the last checkpoint.
+    """
     files = _files_from_git(workspace, final_state.get("git_summary", ""))
+    if in_progress:
+        status = "IN_PROGRESS"
+    elif final_state.get("review_complete"):
+        status = "COMPLETE"
+    else:
+        status = "INCOMPLETE"
     return {
         "id": session_id,
         "created_at": datetime.now().isoformat(),
         "workspace": workspace,
         "goal": goal,
-        "status": "COMPLETE" if final_state.get("review_complete") else "INCOMPLETE",
+        "status": status,
         "iterations": final_state.get("iteration", 0),
         "files_modified": files,
         "git_summary": final_state.get("git_summary", ""),
         "pr_url": final_state.get("pr_url", ""),
-        "summary": (final_state.get("implementation_steps") or "")[:1000].strip(),
+        "summary": (
+            final_state.get("implementation_steps")
+            or final_state.get("development_plan")
+            or ""
+        )[:1000].strip(),
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
         "duration_seconds": duration_seconds,

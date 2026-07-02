@@ -488,10 +488,14 @@ def _run_tests(ctx: ToolContext, command: str = "") -> ToolResult:
     """Run the project test suite. Defaults to detecting pytest/uv."""
     cmd = command.strip() or _autodetect_test_command(ctx)
     result = _run_command(ctx, cmd)
-    # Re-label the action for the model's benefit.
+    # Re-label the action for the model's benefit (keep the simulated flag —
+    # a dry-run/plan-mode result must never read as a real green suite).
     if result.ok:
         result = ToolResult(
-            True, result.output.replace("[exit 0]", "[tests passed]"), ""
+            True,
+            result.output.replace("[exit 0]", "[tests passed]"),
+            "",
+            simulated=result.simulated,
         )
     return result
 

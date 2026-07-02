@@ -22,6 +22,7 @@ from coding_harness.config import (
     model_name_for_task,
 )
 from coding_harness.context import ContextManager
+from coding_harness.control import CONTROL
 from coding_harness.principles import inject_into_prompt as inject_principles
 from coding_harness.tokens import LEDGER, calibrate, estimate_tokens
 
@@ -42,6 +43,10 @@ def run_step(
     system prompt, so every agent — regardless of which model is configured —
     is governed by the same behavioral constitution.
     """
+    # Abort between agent steps when the user cancelled the run (TUI Escape).
+    CONTROL.checkpoint()
+    CONTROL.set_activity(f"{step} · thinking")
+
     cm = ContextManager(budget or BUDGET)
     body, report = cm.build_context(chunks)
     system = inject_principles(system, workspace)

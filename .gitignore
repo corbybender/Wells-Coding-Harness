@@ -15,5 +15,9 @@ wheels/
 # Local model caches
 .fastembed_cache/
 
+# Generated repo index + Rust build artifacts
+.wells_index/
+wells-index/target/
+
 # Windows reserved-name artifact
 nul

@@ -4,32 +4,47 @@ Replaces the prompt_toolkit REPL with a proper layout:
   ┌─────────────────────────────────────────────┐
   │  RichLog  — scrollable output               │
   ├─────────────────────────────────────────────┤
-  │  Input    — user prompt                     │
+  │  PromptInput — multi-line user prompt       │
   ├─────────────────────────────────────────────┤
   │  StatusBar — always visible, refreshes live │
   └─────────────────────────────────────────────┘
 
-Output is captured from both sys.stdout (bare print / streaming tokens)
-and a Rich console proxy (Rich markup / tables / panels from cli.py).
-Both paths write to the RichLog widget via call_from_thread, keeping
-the status bar visible at all times regardless of what's running.
+Run output arrives through three channels, in order of preference:
+  1. Typed UI events from ``control.CONTROL`` (executor tool lines, warnings).
+  2. A Rich console proxy (Rich markup / tables / panels from cli.py).
+  3. Captured sys.stdout (stray prints from agents / libraries).
+All three funnel into :meth:`WellsApp.write_log`, which also records a
+transcript for ``/export``.
+
+Cancellation is cooperative: Escape sets ``CONTROL.cancel()`` and the
+executor / graph loop stop at the next step boundary. Thread workers cannot
+be killed, so the input stays disabled until the worker actually exits.
 """
 
 from __future__ import annotations
 
+import io
+import json
 import sys
+import threading
 import time as _time
+from pathlib import Path
 from typing import Any
 
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
-from textual.widgets import Input, OptionList, RichLog, Static
+from textual.message import Message
+from textual.widgets import OptionList, RichLog, Static, TextArea
 from textual.widgets._option_list import Option
 
 from coding_harness import chat, config
+from coding_harness.control import CONTROL, UIEvent
 from coding_harness.tokens import LEDGER
+
+_HISTORY_FILE = Path.home() / ".wells" / "history.json"
+_HISTORY_MAX = 200
 
 # ---------------------------------------------------------------------------
 # CSS
@@ -48,7 +63,7 @@ Screen {
 }
 
 #bottom {
-    height: 4;
+    height: auto;
     dock: bottom;
 }
 
@@ -63,7 +78,8 @@ Screen {
 }
 
 #input {
-    height: 3;
+    height: auto;
+    max-height: 8;
     border: tall $accent 40%;
     background: $surface;
 }
@@ -85,7 +101,7 @@ StatusBar {
 # ---------------------------------------------------------------------------
 
 class StatusBar(Static):
-    """Persistent status bar: workspace | model | tokens | mode."""
+    """Persistent status bar: workspace | model | tokens | activity | mode."""
 
     def on_mount(self) -> None:
         self.set_interval(0.25, self._refresh)
@@ -133,7 +149,9 @@ class StatusBar(Static):
                 elapsed = f"[yellow]{secs // 60}m {secs % 60:02d}s[/yellow]"
             else:
                 elapsed = f"[dim]{secs}s[/dim]"
-            elapsed_s = f"  {elapsed}"
+            activity = CONTROL.activity()
+            act_s = f"  [magenta]{activity}[/magenta]" if activity else ""
+            elapsed_s = f"  {elapsed}{act_s}  [dim]esc: cancel[/dim]"
         else:
             elapsed_s = ""
 
@@ -143,6 +161,65 @@ class StatusBar(Static):
             f"[cyan]{tokens_s}[/cyan]{elapsed_s}  "
             f"{mode}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Multi-line prompt input
+# ---------------------------------------------------------------------------
+
+class PromptInput(TextArea):
+    """Multi-line prompt. Enter submits; Shift+Enter / Ctrl+J inserts a newline.
+
+    Up on the first line / Down on the last line scroll the prompt history
+    (handled by the app via :class:`HistoryScroll`).
+    """
+
+    class Submitted(Message):
+        def __init__(self, value: str) -> None:
+            self.value = value
+            super().__init__()
+
+    class HistoryScroll(Message):
+        def __init__(self, direction: int) -> None:
+            self.direction = direction  # -1 older, +1 newer
+            super().__init__()
+
+    async def _on_key(self, event) -> None:
+        key = event.key
+
+        if key == "enter":
+            event.stop()
+            event.prevent_default()
+            self.post_message(self.Submitted(self.text))
+            return
+
+        if key in ("shift+enter", "ctrl+j"):
+            event.stop()
+            event.prevent_default()
+            self.insert("\n")
+            return
+
+        if key == "escape":
+            # Bubble to the app: closes the command popup / cancels the task.
+            return
+
+        if key == "up" and self.cursor_location[0] == 0:
+            event.stop()
+            event.prevent_default()
+            self.post_message(self.HistoryScroll(-1))
+            return
+
+        if key == "down":
+            popup = getattr(self.app, "_cmdlist", None)
+            if popup is not None and popup.display:
+                return  # bubble: the app moves focus into the command list
+            if self.cursor_location[0] == self.document.line_count - 1:
+                event.stop()
+                event.prevent_default()
+                self.post_message(self.HistoryScroll(1))
+                return
+
+        await super()._on_key(event)
 
 
 # ---------------------------------------------------------------------------
@@ -164,13 +241,13 @@ class _TUIStdout:
                 lines = self._buf.split("\n")
                 for line in lines[:-1]:
                     if line:
-                        self._app.call_from_thread(self._app._log.write, line)
+                        self._app.call_from_thread(self._app.write_log, line)
                 self._buf = lines[-1]
         return len(text)
 
     def flush(self) -> None:
         if self._buf:
-            self._app.call_from_thread(self._app._log.write, self._buf)
+            self._app.call_from_thread(self._app.write_log, self._buf)
             self._buf = ""
 
     def fileno(self) -> int:
@@ -181,7 +258,7 @@ class _TUIStdout:
 
 
 class _TUIConsole:
-    """Drop-in for Rich Console inside cli.py; routes markup to RichLog.
+    """Drop-in for Rich Console inside cli.py; routes markup to the log.
 
     thread_safe=True  → use call_from_thread (worker threads)
     thread_safe=False → call widget directly   (asyncio main thread)
@@ -193,9 +270,9 @@ class _TUIConsole:
 
     def _write(self, renderable: Any) -> None:
         if self._thread_safe:
-            self._app.call_from_thread(self._app._log.write, renderable)
+            self._app.call_from_thread(self._app.write_log, renderable)
         else:
-            self._app._log.write(renderable)
+            self._app.write_log(renderable)
 
     def print(self, *args, **kwargs) -> None:
         if not args:
@@ -246,7 +323,6 @@ class WellsApp(App[None]):
 
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit", priority=True),
-        Binding("ctrl+d", "quit", "Quit"),
         Binding("escape", "cancel_task", "Cancel task"),
         Binding("ctrl+l", "clear_log", "Clear output"),
         # Scroll bindings — priority=True so they fire even when Input has focus.
@@ -265,8 +341,14 @@ class WellsApp(App[None]):
         self._agent_state: dict = {}
         self._busy = False
         # Pending interactive command waiting for a follow-up reply.
-        # Format: {"kind": "resume_select"|"sessions_clear", "data": ...}
+        # Format: {"kind": "resume_select"|"sessions_clear"|"approval", ...}
         self._pending: dict | None = None
+        # Prompt history (persisted) + browse state.
+        self._history: list[str] = []
+        self._hist_idx: int | None = None
+        self._hist_draft: str = ""
+        # Everything ever written to the log, for /export.
+        self._transcript: list[Any] = []
 
     # ------------------------------------------------------------------
     # Layout
@@ -281,9 +363,10 @@ class WellsApp(App[None]):
         )
         yield OptionList(id="command-list")
         with Vertical(id="bottom"):
-            yield Input(
-                placeholder="Ask a question or give a task… (/ for commands, Ctrl+C to quit)",
+            yield PromptInput(
                 id="input",
+                placeholder="Ask a question or give a task… (/ commands, Shift+Enter newline)",
+                show_line_numbers=False,
             )
             yield StatusBar()
 
@@ -292,11 +375,12 @@ class WellsApp(App[None]):
     # ------------------------------------------------------------------
 
     def on_mount(self) -> None:
+        from coding_harness import safety
         from coding_harness.cli import _REPL_STATE
         from coding_harness.graph import build_graph
 
         self._log: RichLog = self.query_one("#output", RichLog)
-        self._input: Input = self.query_one("#input", Input)
+        self._input: PromptInput = self.query_one("#input", PromptInput)
         self._cmdlist: OptionList = self.query_one("#command-list", OptionList)
 
         # Initialize shared REPL state.
@@ -305,6 +389,13 @@ class WellsApp(App[None]):
         _REPL_STATE["last_state"] = {}
         _REPL_STATE["resume_context"] = self._resume_context
         _REPL_STATE["resume_session_id"] = None
+
+        # Typed UI events from the executor render directly (no stdout hop).
+        CONTROL.set_listener(self._on_ui_event)
+        # Under HARNESS_SAFETY=approve, destructive tool calls ask the user here.
+        safety.set_approver(self._tui_approver)
+
+        self._history = self._history_load()
 
         # Build the LangGraph (may take a moment).
         self._graph_app = build_graph()
@@ -327,13 +418,28 @@ class WellsApp(App[None]):
         self._ensure_repo_index()
         self._input.focus()
 
+    def on_unmount(self) -> None:
+        CONTROL.set_listener(None)
+
     # ------------------------------------------------------------------
     # Output helpers
     # ------------------------------------------------------------------
 
     def write_log(self, renderable: Any) -> None:
         """Write to the RichLog from the asyncio event loop thread."""
+        self._transcript.append(renderable)
         self._log.write(renderable)
+
+    def _on_ui_event(self, ev: UIEvent) -> None:
+        """Render a typed executor event (called from worker threads)."""
+        try:
+            self.call_from_thread(self.write_log, ev.text)
+        except Exception:
+            # Already on the app thread (or app shutting down).
+            try:
+                self.write_log(ev.text)
+            except Exception:
+                pass
 
     def _print_welcome(self) -> None:
         self.write_log("\n[bold blue]Wells Coding Harness[/bold blue]")
@@ -345,7 +451,8 @@ class WellsApp(App[None]):
         self.write_log(
             "Ask anything — questions, edits, tasks. "
             "Use [bold]/orchestrate[/bold] for complex multi-component work. "
-            "Type [bold]/[/bold] for all commands.\n"
+            "Type [bold]/[/bold] for all commands. "
+            "[dim]Shift+Enter: newline · ↑/↓: history · Esc: cancel run[/dim]\n"
         )
 
     def _ensure_repo_index(self) -> None:
@@ -364,14 +471,66 @@ class WellsApp(App[None]):
             pass
 
     # ------------------------------------------------------------------
+    # Prompt history
+    # ------------------------------------------------------------------
+
+    def _history_load(self) -> list[str]:
+        try:
+            data = json.loads(_HISTORY_FILE.read_text(encoding="utf-8"))
+            return [str(x) for x in data][-_HISTORY_MAX:]
+        except Exception:
+            return []
+
+    def _history_save(self) -> None:
+        try:
+            _HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _HISTORY_FILE.write_text(
+                json.dumps(self._history[-_HISTORY_MAX:], ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    def _history_add(self, text: str) -> None:
+        if text and (not self._history or self._history[-1] != text):
+            self._history.append(text)
+            self._history_save()
+        self._hist_idx = None
+        self._hist_draft = ""
+
+    def _set_input_text(self, text: str) -> None:
+        self._input.load_text(text)
+        self._input.move_cursor(self._input.document.end)
+
+    def on_prompt_input_history_scroll(self, event: PromptInput.HistoryScroll) -> None:
+        if not self._history:
+            return
+        if self._hist_idx is None:
+            if event.direction > 0:
+                return  # nothing newer than the live draft
+            self._hist_draft = self._input.text
+            self._hist_idx = len(self._history) - 1
+        else:
+            self._hist_idx += event.direction
+
+        if self._hist_idx >= len(self._history):
+            # Scrolled past the newest entry — restore the draft.
+            self._hist_idx = None
+            self._set_input_text(self._hist_draft)
+            return
+
+        self._hist_idx = max(0, self._hist_idx)
+        self._set_input_text(self._history[self._hist_idx])
+
+    # ------------------------------------------------------------------
     # Input handling
     # ------------------------------------------------------------------
 
-    def on_input_changed(self, event: Input.Changed) -> None:
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
         """Show/hide the command popup as the user types."""
         from coding_harness.cli import SLASH_COMMANDS
-        value = event.value
-        if value.startswith("/"):
+        value = self._input.text
+        if value.startswith("/") and "\n" not in value:
             matches = [
                 (cmd, short) for cmd, short, _ in SLASH_COMMANDS
                 if cmd.startswith(value)
@@ -397,15 +556,14 @@ class WellsApp(App[None]):
         """Fill the input with the selected command and return focus."""
         cmd = event.option_id or ""
         if cmd:
-            self._input.value = cmd + " "
-            self._input.cursor_position = len(self._input.value)
+            self._set_input_text(cmd + " ")
         self._cmdlist.display = False
         self._input.focus()
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
+    def on_prompt_input_submitted(self, event: PromptInput.Submitted) -> None:
         self._cmdlist.display = False
         text = event.value.strip()
-        self._input.clear()
+        self._input.load_text("")
         if not text:
             return
 
@@ -413,6 +571,8 @@ class WellsApp(App[None]):
         if self._pending:
             self._handle_pending_reply(text)
             return
+
+        self._history_add(text)
 
         if text.startswith("/"):
             self._dispatch_slash(text)
@@ -441,9 +601,13 @@ class WellsApp(App[None]):
         args = parts[1:]
         arg = args[0] if args else ""
 
-        # -- Intercept blocking commands first --------------------------------
+        # -- Intercept blocking / TUI-only commands first ----------------------
         if cmd == "/resume":
             self._start_resume_picker(arg)
+            return
+
+        if cmd == "/export":
+            self._export_transcript(" ".join(args))
             return
 
         if cmd == "/sessions" and arg.lower() == "clear":
@@ -467,6 +631,29 @@ class WellsApp(App[None]):
 
         if not keep_running:
             self.exit()
+
+    def _export_transcript(self, arg: str) -> None:
+        """Write the full session log to a plain-text/markdown file."""
+        from rich.console import Console as _RichConsole
+
+        name = (arg or "").strip() or _time.strftime("wells-transcript-%Y%m%d-%H%M%S.md")
+        path = Path(name).expanduser()
+        if not path.is_absolute():
+            path = Path(config.WORKSPACE_ROOT) / path
+
+        buf = io.StringIO()
+        rc = _RichConsole(file=buf, width=100, force_terminal=False)
+        for item in self._transcript:
+            try:
+                rc.print(item)
+            except Exception:
+                rc.print(str(item))
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(buf.getvalue(), encoding="utf-8")
+            self.write_log(f"[green]Transcript exported → {path}[/green]")
+        except Exception as e:
+            self.write_log(f"[red]Export failed: {e}[/red]")
 
     def _start_resume_picker(self, arg: str) -> None:
         from coding_harness.sessions import (
@@ -526,6 +713,20 @@ class WellsApp(App[None]):
             else:
                 self.write_log("[dim]Cancelled.[/dim]")
 
+        elif kind == "approval":
+            pend = self._pending
+            self._pending = None
+            ok = text.lower() in ("y", "yes")
+            pend["holder"]["ok"] = ok
+            self.write_log(
+                "[green]Approved.[/green]" if ok else "[dim]Denied.[/dim]"
+            )
+            if self._busy:
+                # Hand the input back to the running worker.
+                self._input.disabled = True
+                self._input.placeholder = "Working…"
+            pend["event"].set()
+
     def _load_resume_session(self, session: dict) -> None:
         from coding_harness.sessions import build_resume_context
         import coding_harness.cli as cli_mod
@@ -541,11 +742,47 @@ class WellsApp(App[None]):
         )
 
     # ------------------------------------------------------------------
+    # Safety approval (HARNESS_SAFETY=approve)
+    # ------------------------------------------------------------------
+
+    def _tui_approver(self, action: str, detail: str) -> bool:
+        """Ask the user to approve a destructive action.
+
+        Called from a worker thread while a run is in flight; blocks that
+        thread until the user answers (or the run is cancelled).
+        """
+        if threading.current_thread() is threading.main_thread():
+            # Cannot block the UI thread; deny → safety degrades to dry-run.
+            return False
+
+        ev = threading.Event()
+        holder = {"ok": False}
+
+        def _ask() -> None:
+            self.write_log(
+                f"\n[bold yellow]Approval needed:[/bold yellow] {action}"
+                f"\n  [dim]{detail}[/dim]"
+                "\n[dim]Type [bold]y[/bold] to approve, anything else to deny.[/dim]"
+            )
+            self._pending = {"kind": "approval", "event": ev, "holder": holder}
+            self._input.disabled = False
+            self._input.placeholder = "Approve? y/N"
+            self._input.focus()
+
+        self.call_from_thread(_ask)
+
+        while not ev.wait(0.5):
+            if CONTROL.cancelled():
+                return False
+        return holder["ok"]
+
+    # ------------------------------------------------------------------
     # Task / chat runner (worker thread)
     # ------------------------------------------------------------------
 
     def _start_run(self, text: str) -> None:
         import coding_harness.cli as _cli
+        CONTROL.reset()
         self._busy = True
         self._input.disabled = True
         self._input.placeholder = "Working…"
@@ -583,7 +820,7 @@ class WellsApp(App[None]):
             from coding_harness.cli import StreamingCallback, _run_auto
             callbacks = [StreamingCallback()]
 
-            if intent == "task":
+            if intent in ("task", "orchestrate"):
                 _run_task(text, self._agent_state, self._graph_app, callbacks)
                 _REPL_STATE["memory"].set_run_summary(
                     _summarize_run(_REPL_STATE.get("last_state", {}))
@@ -596,11 +833,16 @@ class WellsApp(App[None]):
                 self.write_log, f"[bold red]Error:[/bold red] {e}"
             )
         finally:
-            # Flush any buffered output before restoring.
+            # Flush any buffered output, then restore I/O — but only if this
+            # worker still owns the redirect (a cancelled worker must never
+            # clobber the redirect installed by a newer run).
             tui_stdout.flush()
-            cli_mod.console = orig_cli_console
-            sys.stdout = orig_stdout
-            sys.stderr = orig_stderr
+            if sys.stdout is tui_stdout:
+                sys.stdout = orig_stdout
+            if sys.stderr is tui_stdout:
+                sys.stderr = orig_stderr
+            if cli_mod.console is tui_console:
+                cli_mod.console = orig_cli_console
 
             self._busy = False
             self.call_from_thread(self._restore_input)
@@ -608,9 +850,10 @@ class WellsApp(App[None]):
     def _restore_input(self) -> None:
         import coding_harness.cli as _cli
         _cli._REPL_STATE["busy_since"] = None
+        CONTROL.set_activity("")
         self._input.disabled = False
         self._input.placeholder = (
-            "Ask a question or give a task… (/ for commands, Ctrl+C to quit)"
+            "Ask a question or give a task… (/ commands, Shift+Enter newline)"
         )
         self._input.focus()
 
@@ -622,11 +865,19 @@ class WellsApp(App[None]):
         self.exit()
 
     def action_cancel_task(self) -> None:
-        if self._busy:
-            self.workers.cancel_all()
-            self.write_log("\n[yellow]Task cancelled.[/yellow]")
-            self._busy = False
-            self._restore_input()
+        # A pending approval blocks the worker — deny it so the cancel lands.
+        if self._pending and self._pending.get("kind") == "approval":
+            pend = self._pending
+            self._pending = None
+            pend["holder"]["ok"] = False
+            pend["event"].set()
+
+        if self._busy and not CONTROL.cancelled():
+            CONTROL.cancel()
+            CONTROL.set_activity("cancelling…")
+            self.write_log(
+                "\n[yellow]Cancelling — stops after the current step…[/yellow]"
+            )
 
     def action_clear_log(self) -> None:
         self._log.clear()

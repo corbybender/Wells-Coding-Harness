@@ -43,6 +43,36 @@ def indexer_node(state: AgentState) -> AgentState:
         return {"index_ready": False}
 
 
+def _route_after_plan(state: AgentState) -> str:
+    """Conditional edge after the planner: skip the architect for simple tasks.
+
+    The planner labels its own plan SIMPLE/COMPLEX. Simple plans (localized
+    edits, no new modules/APIs) go straight to the coder — the architect pass
+    would only restate them. Unknown/missing labels default to complex.
+    """
+    if state.get("plan_complexity") == "simple":
+        print("[graph] simple plan -> coder (architect skipped).")
+        return "code"
+    return "design"
+
+
+def _route_after_tests(state: AgentState) -> str:
+    """Conditional edge after the tester: fail-fast on deterministic failures.
+
+    When the harness itself ran the suite and it failed, there is nothing for
+    the reviewer to judge — loop straight back to the coder (via the
+    summarizer) and save the reviewer call. Without ground truth (or once the
+    iteration cap is reached) the reviewer decides as usual.
+    """
+    if state.get("tests_passed") is False:
+        iteration = state.get("iteration", 0)
+        cap = state.get("max_iterations", MAX_ITERATIONS)
+        if iteration < cap:
+            print(f"[graph] tests failing (iteration {iteration}) -> summarizer -> coder (reviewer skipped).")
+            return "loop"
+    return "review"
+
+
 def _route_after_review(state: AgentState) -> str:
     """Conditional edge after the reviewer: loop or finalize."""
     if state.get("review_complete"):
@@ -72,10 +102,20 @@ def build_graph():
 
     graph.add_edge(START, "indexer")
     graph.add_edge("indexer", "planner")
-    graph.add_edge("planner", "architect")
+    # Simple plans skip the architect (it would only restate them).
+    graph.add_conditional_edges(
+        "planner",
+        _route_after_plan,
+        {"design": "architect", "code": "coder"},
+    )
     graph.add_edge("architect", "coder")
     graph.add_edge("coder", "tester")
-    graph.add_edge("tester", "reviewer")
+    # Deterministic test failures loop straight back (reviewer skipped).
+    graph.add_conditional_edges(
+        "tester",
+        _route_after_tests,
+        {"review": "reviewer", "loop": "summarizer"},
+    )
     # On INCOMPLETE: condense context, then iterate.
     graph.add_conditional_edges(
         "reviewer",

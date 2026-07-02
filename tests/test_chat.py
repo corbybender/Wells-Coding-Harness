@@ -17,7 +17,9 @@ from coding_harness.chat import ConversationMemory, classify_intent
 # Heuristic classifier (no LLM calls)
 # ---------------------------------------------------------------------------
 
-CHAT_INPUTS = [
+# Everything that isn't clearly architectural routes to "auto" — the direct
+# executor answers questions AND performs small tasks.
+AUTO_INPUTS = [
     "explain your previous output in a simple summary. Did you actually make the fix I asked for?",
     "Did you actually make the fix?",
     "What does this file do?",
@@ -26,56 +28,49 @@ CHAT_INPUTS = [
     "why does the test fail?",
     "how do I fix the login bug?",
     "What did you change?",
-    "explain what you just did",
-    "can you tell me what happened?",
     "ok",
-    "yes",
-    "hi there",
     "what's the status of the last run?",
-    "describe the architecture you proposed",
-]
-
-TASK_INPUTS = [
-    "we need to modify the Page picking section of /admin",
     "fix the bug in parser.py",
     "add a login page",
-    "refactor the auth module",
-    "create a new component for the dashboard",
-    "can you fix the bug?",  # wants work done
-    "please implement the feature",
     "write a test for the parser",
     "delete the old config file",
     "update the README to include install steps",
-    "migrate the database schema",
     "please add a button that loads the selected page",
 ]
 
-
-@pytest.mark.parametrize("text", CHAT_INPUTS)
-def test_classify_chat(text):
-    assert classify_intent(text, use_llm_fallback=False) == "chat", text
-
-
-@pytest.mark.parametrize("text", TASK_INPUTS)
-def test_classify_task(text):
-    assert classify_intent(text, use_llm_fallback=False) == "task", text
-
-
-def test_empty_is_chat():
-    assert classify_intent("", use_llm_fallback=False) == "chat"
+# Big-creation verb + architectural scope noun → full orchestration graph.
+ORCHESTRATE_INPUTS = [
+    "build a login system with OAuth2, JWT, and database schema",
+    "implement a complete REST API with authentication and tests",
+    "create an authentication service for the platform",
+    "design a data pipeline for ingesting events",
+    "rewrite the backend as a microservice",
+    "set up a CI/CD pipeline for this repo",
+]
 
 
-def test_ambiguous_defaults_to_task_without_llm():
-    # A single neutral noun like "dashboard" is ambiguous -> task (conservative).
-    assert classify_intent("dashboard", use_llm_fallback=False) == "task"
+@pytest.mark.parametrize("text", AUTO_INPUTS)
+def test_classify_auto(text):
+    assert classify_intent(text, use_llm_fallback=False) == "auto", text
 
 
-def test_llm_fallback_disabled_returns_task_for_ambiguous():
-    assert classify_intent("something", use_llm_fallback=False) == "task"
+@pytest.mark.parametrize("text", ORCHESTRATE_INPUTS)
+def test_classify_orchestrate(text):
+    assert classify_intent(text, use_llm_fallback=False) == "orchestrate", text
+
+
+def test_empty_is_auto():
+    assert classify_intent("", use_llm_fallback=False) == "auto"
+
+
+def test_ambiguous_defaults_to_auto_without_llm():
+    # A single neutral noun like "dashboard" is ambiguous -> auto (safe default).
+    assert classify_intent("dashboard", use_llm_fallback=False) == "auto"
+    assert classify_intent("something", use_llm_fallback=False) == "auto"
 
 
 def test_classifier_cache_cleared():
-    chat._CLASSIFIER_CACHE["stub"] = "chat"
+    chat._CLASSIFIER_CACHE["stub"] = "auto"
     chat.clear_classifier_cache()
     assert chat._CLASSIFIER_CACHE == {}
 

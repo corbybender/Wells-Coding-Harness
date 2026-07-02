@@ -226,3 +226,55 @@ def test_loop_plan_mode_simulates_writes(ctx: tools.ToolContext, workspace: Path
     # The edit was simulated, not applied.
     assert result.tool_calls[0]["simulated"] is True
     assert "return a - b" in (workspace / "maths.py").read_text()
+
+
+# ---------------------------------------------------------------------------
+# Cooperative cancellation + per-run token budget
+# ---------------------------------------------------------------------------
+
+
+def test_loop_stops_on_cancel(ctx: tools.ToolContext):
+    from coding_harness.control import CONTROL
+
+    LEDGER.reset()
+    CONTROL.reset()
+
+    def cancelling(llm, messages):
+        # First model call succeeds but the user cancels during it.
+        CONTROL.cancel()
+        return AIMessage(
+            content='<tool_call>{"name": "list_dir", "args": {}}</tool_call>'
+        )
+
+    try:
+        with (
+            patch.object(config, "_invoke_with_retry", side_effect=cancelling),
+            patch.object(executor, "_try_bind_tools", return_value=None),
+        ):
+            result = executor.run_executor(
+                task="x", ctx=ctx, max_steps=10, step_label="t"
+            )
+    finally:
+        CONTROL.reset()
+    assert result.stopped_reason == "cancelled"
+    # The tool call queued in the same response is skipped once cancelled.
+    assert result.steps_taken == 0
+
+
+def test_loop_stops_on_token_budget(ctx: tools.ToolContext):
+    from coding_harness.control import CONTROL
+
+    LEDGER.reset()
+    CONTROL.reset()
+    repeat = AIMessage(
+        content='<tool_call>{"name": "list_dir", "args": {}}</tool_call>'
+    )
+    with (
+        patch.object(config, "_invoke_with_retry", side_effect=_scripted([repeat] * 20)),
+        patch.object(executor, "_try_bind_tools", return_value=None),
+        patch.object(config, "MAX_RUN_TOKENS", 1),
+    ):
+        result = executor.run_executor(task="x", ctx=ctx, max_steps=10, step_label="t")
+    # First round runs (usage 0 < budget), second round trips the cap.
+    assert result.stopped_reason == "budget"
+    assert "budget" in result.summary
