@@ -374,7 +374,7 @@ if INDEXER_AVAILABLE:
     INDEX_TOOLS = [
         ToolDef(
             name="find_symbol",
-            description="Find definition of a symbol by exact name (faster and more precise than grep for symbol lookups)",
+            description="PREFERRED over grep/read: instantly locate where a function, class, or variable is defined. Returns file path and line number. Use this first whenever you need to find any named symbol.",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -422,7 +422,7 @@ if INDEXER_AVAILABLE:
         ),
         ToolDef(
             name="search_symbols",
-            description="Prefix/substring search across all indexed symbol names",
+            description="PREFERRED over grep: search for symbols by name prefix or substring across the whole repo. Use when you don't know the exact name. Returns file:line for each match.",
             input_schema={
                 "type": "object",
                 "properties": {

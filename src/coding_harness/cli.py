@@ -353,6 +353,12 @@ def _run_auto(text: str, agent_state: dict, callbacks) -> None:
         safety=agent_state.get("safety", config.HARNESS_SAFETY),
     )
 
+    # Ensure the repo index is current before every executor run so that
+    # find_symbol / search_symbols return real results (not empty).
+    if config.INDEX_AUTO_UPDATE:
+        from coding_harness import index_tools
+        index_tools.ensure_index(ctx.workspace, auto_build=True)
+
     try:
         result = run_executor(
             task=effective_task,

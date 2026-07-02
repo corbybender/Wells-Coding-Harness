@@ -187,11 +187,15 @@ AVAILABLE TOOLS:
 {plan_note}
 
 WORKING RULES:
-1. Investigate before acting: read/list/grep to understand the relevant code first.
-2. Make focused changes; after each edit, verify (re-read, run tests/lint) before continuing.
-3. When you have finished the task and verified your work, stop calling tools and reply
-   with a concise summary of what you changed and the verification result.
-4. If you cannot complete the task after reasonable effort, stop and explain what blocked you.
+1. Index-first lookup: when you need to find where a function/class/variable is defined,
+   call find_symbol(name) first. It returns the exact file:line instantly. Only fall back
+   to grep or read when the symbol isn't in the index or you need surrounding context.
+2. No re-reading: if you have already read a file, do NOT read it again. Check what you
+   already know from prior tool results; use grep with a specific pattern if you need
+   one more piece of info from that file.
+3. Investigate before acting: read/list to understand structure, then make focused changes.
+4. After each edit, verify (re-read the changed section, run tests/lint) then stop.
+5. If you cannot complete the task after reasonable effort, stop and explain the blocker.
 
 TOOL CALLING:
 - If your runtime exposes native tool/function calls, use them.
@@ -693,6 +697,7 @@ def run_executor(
     steps = 0
     rounds = 0
     total_saved = 0
+    _reads: dict[str, int] = {}  # path → times read, for re-read detection
 
     while steps < cap:
         # ── Context management pipeline (order matters) ──────────────────────
@@ -775,6 +780,15 @@ def run_executor(
                 "output_preview": (result.output or result.error or "")[:200],
                 "simulated": result.simulated,
             })
+            # Track file reads; warn when the same file is read multiple times.
+            if name == "read_file":
+                fpath = _short_path(str(args.get("path", "")))
+                _reads[fpath] = _reads.get(fpath, 0) + 1
+                if _reads[fpath] == 2:
+                    print(f"  [yellow]⚠ re-reading {fpath} — consider grep or find_symbol instead[/yellow]")
+                elif _reads[fpath] > 2:
+                    print(f"  [yellow]⚠ reading {fpath} for the {_reads[fpath]}th time[/yellow]")
+
             print(_activity_line(name, args, result.ok, result.simulated))
 
             # On failure, show the first meaningful error line so the user
