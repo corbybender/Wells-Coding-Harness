@@ -135,6 +135,9 @@ class ExecutorResult:
     )  # [{name, args, ok, output_preview}]
     stopped_reason: str = "done"  # done | max_steps | error | cancelled | budget
     messages: list[BaseMessage] = field(default_factory=list)
+    # True when the final answer was already streamed to the console live
+    # (callers should not print result.summary again).
+    streamed: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -667,6 +670,7 @@ def run_executor(
     seed_messages: list[BaseMessage] | None = None,
     step_label: str = "executor",
     quiet: bool = False,
+    stream: bool = False,
 ) -> ExecutorResult:
     """Run the agentic tool-calling loop until completion or the step cap.
 
@@ -687,9 +691,14 @@ def run_executor(
         Suppress per-step UI output and activity updates. Used by parallel
         subagents so concurrent runs don't interleave in the log; token
         accounting and cancellation still apply.
+    stream : bool, optional
+        Stream model text to stdout token-by-token as it is generated (used by
+        the top-level auto path for perceived speed). Falls back to a normal
+        invoke on any streaming error. Ignored when ``quiet`` is set.
     """
     _ui = (lambda *a, **k: None) if quiet else ui
     _act = (lambda s: None) if quiet else CONTROL.set_activity
+    stream = stream and not quiet
     toolset = toolset if toolset is not None else tools.ALL_TOOLS
     cap = max_steps if max_steps is not None else config.MAX_TOOL_STEPS
     profile = profile or config.ACTIVE_PROFILE
@@ -772,8 +781,12 @@ def run_executor(
 
         rounds += 1
         _act(f"thinking · round {rounds} · step {steps}/{cap}")
+        streamed_this_round = False
         try:
-            resp = config._invoke_with_retry(llm, messages)
+            if stream:
+                resp, streamed_this_round = _stream_invoke(llm, messages)
+            else:
+                resp = config._invoke_with_retry(llm, messages)
         except Exception as e:
             return ExecutorResult(
                 summary=f"[executor error: {type(e).__name__}: {e}]",
@@ -791,20 +804,20 @@ def run_executor(
         # Show the LLM's reasoning text (if any) before we execute the tool calls.
         # This tells the user WHY the agent is doing what it's about to do.
         llm_text = _extract_llm_text(resp)
-        if llm_text:
+        if llm_text and not streamed_this_round:
             # Trim to ~200 chars; collapse newlines so it reads as one line.
             preview = " ".join(llm_text.split())[:200]
             if len(llm_text) > 200:
                 preview += "…"
             _ui("llm_text", f"\n[dim italic]{preview}[/dim italic]")
-        elif calls:
+        elif calls and not llm_text:
             # No narrative text — at least show the round number so the user
             # knows progress is being made.
             _ui("round", f"\n[dim]Round {rounds}  (step {steps + 1}/{cap})[/dim]")
 
         if not calls:
             # No tool calls = final answer.
-            if llm_text:
+            if llm_text and not streamed_this_round:
                 _ui("round", "")  # blank line before final summary
             return ExecutorResult(
                 summary=llm_text or "(no output)",
@@ -812,6 +825,7 @@ def run_executor(
                 tool_calls=history,
                 stopped_reason="done",
                 messages=messages,
+                streamed=streamed_this_round and bool(llm_text),
             )
 
         for call in calls:
@@ -871,6 +885,36 @@ def run_executor(
                     obs_text = obs_text + note
                     lbl = "re-reading" if count == 2 else f"reading ×{count}"
                     _ui("warn", f"  [yellow]⚠ {lbl} {fpath} — consider grep or find_symbol instead[/yellow]")
+
+            # ── Self-heal: fast checker after every successful write/edit ──
+            # Ground truth in the same round: a syntax error or undefined name
+            # reaches the model immediately instead of surfacing a full tester
+            # loop (an LLM call) later.
+            if (
+                config.SELF_CHECK
+                and result.ok
+                and not result.simulated
+                and name in ("write_file", "edit_file", "create_file", "patch_file",
+                             "str_replace_editor", "str_replace")
+            ):
+                _checked_path = str(
+                    args.get("path") or args.get("file_path")
+                    or args.get("filename") or ""
+                )
+                if _checked_path:
+                    from coding_harness import checkers
+                    check_err = checkers.quick_check(_checked_path, ctx.workspace)
+                    if check_err:
+                        obs_text = obs_text + (
+                            f"\n\n[HARNESS CHECK: fast lint/syntax check FAILED for "
+                            f"{_short_path(_checked_path)} — fix these before doing "
+                            f"anything else:\n{check_err}]"
+                        )
+                        _ui(
+                            "warn",
+                            f"  [yellow]⚠ check failed: "
+                            f"{_short_path(_checked_path)}[/yellow]",
+                        )
 
             # ── Stuck-loop detection ───────────────────────────────────────
             # Inject a note into obs_text when the same command fails 3+ times
@@ -945,8 +989,47 @@ def run_executor(
 
 
 # ---------------------------------------------------------------------------
-# Internals: tool binding + call extraction + tool message
+# Internals: streaming + tool binding + call extraction + tool message
 # ---------------------------------------------------------------------------
+
+
+def _stream_invoke(llm, messages) -> tuple[BaseMessage, bool]:
+    """Invoke the model with live token streaming to stdout.
+
+    Returns ``(response, streamed_text)``. Chunks are aggregated with ``+`` so
+    the final message carries merged tool_calls/usage exactly like invoke.
+    Falls back to a normal retry-invoke when the provider can't stream.
+    Checks the cancel flag between chunks so Escape lands mid-answer.
+    """
+    import sys as _sys
+
+    try:
+        full = None
+        emitted = False
+        for chunk in llm.stream(messages):
+            full = chunk if full is None else full + chunk
+            if CONTROL.cancelled():
+                break
+            content = getattr(chunk, "content", "") or ""
+            if isinstance(content, list):
+                content = "".join(
+                    b.get("text", "") for b in content if isinstance(b, dict)
+                )
+            if content:
+                if not emitted:
+                    _sys.stdout.write("\n")
+                _sys.stdout.write(content)
+                _sys.stdout.flush()
+                emitted = True
+        if emitted:
+            _sys.stdout.write("\n")
+            _sys.stdout.flush()
+        if full is None:
+            return config._invoke_with_retry(llm, messages), False
+        return full, emitted
+    except Exception:
+        # Provider/transport can't stream — degrade to the retry path.
+        return config._invoke_with_retry(llm, messages), False
 
 
 def _try_bind_tools(llm, toolset: list[tools.ToolDef]):

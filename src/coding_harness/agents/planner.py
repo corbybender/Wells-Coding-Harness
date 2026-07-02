@@ -64,10 +64,16 @@ def planner(state: dict) -> dict:
     goal = state.get("goal", "")
     workspace = state.get("workspace_root")
 
+    # Repo map: start the planner knowing where things live instead of
+    # spending tool steps on discovery.
+    from coding_harness.repomap import repo_map_block
+    map_block = repo_map_block(workspace or "")
+
     # Weave in project memory so the planner knows established facts
     # about this repo (file layout, conventions, prior gotchas).
     task = memory.inject_into_prompt(
-        f"Investigate the codebase and write a concrete implementation plan for:\n\n{goal}",
+        f"Investigate the codebase and write a concrete implementation plan for:\n\n{goal}"
+        f"\n{map_block}",
         workspace,
     )
 

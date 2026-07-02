@@ -31,6 +31,7 @@ REVIEW FEEDBACK TO ADDRESS (if any):
 {feedback}
 
 {memory}
+{repo_map}
 
 The plan above already names the exact files, functions, and line numbers you need.
 Follow it step by step:
@@ -72,12 +73,15 @@ def coder(state: dict) -> dict:
         if mem_slice
         else ""
     )
+    from coding_harness.repomap import repo_map_block
+
     task = CODER_TASK_TEMPLATE.format(
         workspace=ctx.workspace,
         goal=state.get("goal", ""),
         context=_build_context_block(state),
         feedback=feedback,
         memory=mem_block,
+        repo_map=repo_map_block(ctx.workspace),
     )
 
     result = run_executor(

@@ -239,3 +239,121 @@ def diff_summary(ctx: "ToolContext", *, ref: str = "HEAD") -> str:
         return ""
     ok, out = _run(ctx, f"git diff --stat {ref}")
     return out.strip() if ok else ""
+
+
+# ---------------------------------------------------------------------------
+# Working-tree snapshots (run checkpoints for /undo)
+#
+# These are internal harness operations, so they bypass the tool layer's
+# safety gate on purpose: a checkpoint must never trigger an approval prompt,
+# and it never touches the real index or working tree (temp-index trick).
+# ---------------------------------------------------------------------------
+
+_UNDO_REF = "refs/wells/undo"
+
+
+def _git(workspace: str, *args: str, env_extra: dict | None = None,
+         timeout: int = 120) -> tuple[bool, str]:
+    """Run git directly (argv, no shell) in ``workspace``."""
+    import os
+    import subprocess
+
+    env = {**os.environ, **(env_extra or {})}
+    try:
+        p = subprocess.run(
+            ["git", *args], cwd=workspace, capture_output=True, text=True,
+            timeout=timeout, env=env,
+        )
+    except Exception as e:
+        return False, str(e)
+    return p.returncode == 0, ((p.stdout or "") + (p.stderr or "")).strip()
+
+
+def snapshot_worktree(workspace: str) -> str:
+    """Snapshot the working tree (tracked + untracked) to a hidden commit.
+
+    Uses a temporary index so neither the real index nor the working tree is
+    touched. Returns the commit sha ('' for non-git workspaces or on failure).
+    The sha is also stored at refs/wells/undo so it survives restarts.
+    """
+    ok, out = _git(workspace, "rev-parse", "--is-inside-work-tree")
+    if not ok or "true" not in out.lower():
+        return ""
+
+    import os
+    import tempfile
+
+    fd, tmp_index = tempfile.mkstemp(prefix="wells-undo-index-")
+    os.close(fd)
+    os.unlink(tmp_index)  # git wants to create it itself
+    env = {"GIT_INDEX_FILE": tmp_index}
+    try:
+        ok, head = _git(workspace, "rev-parse", "--verify", "HEAD")
+        head_sha = head.strip() if ok else ""
+        if head_sha:
+            if not _git(workspace, "read-tree", "HEAD", env_extra=env)[0]:
+                return ""
+        if not _git(workspace, "add", "-A", ".", env_extra=env)[0]:
+            return ""
+        ok, tree = _git(workspace, "write-tree", env_extra=env)
+        if not ok:
+            return ""
+        args = ["commit-tree", tree.strip(), "-m", "wells run checkpoint"]
+        if head_sha:
+            args += ["-p", head_sha]
+        ok, sha = _git(workspace, *args)
+        if not ok:
+            return ""
+        sha = sha.strip()
+        _git(workspace, "update-ref", _UNDO_REF, sha)
+        return sha
+    finally:
+        try:
+            os.unlink(tmp_index)
+        except OSError:
+            pass
+
+
+def snapshot_diff_stat(workspace: str, sha: str) -> str:
+    """Diff stat of the current working tree vs a snapshot ('' when identical)."""
+    if not sha:
+        return ""
+    ok, out = _git(workspace, "diff", "--stat", sha)
+    return out.strip() if ok else ""
+
+
+def restore_snapshot(workspace: str, sha: str) -> tuple[bool, str]:
+    """Restore the working tree to snapshot ``sha``.
+
+    Restores every file recorded in the snapshot (mods and deletions undone)
+    and removes files created since. Returns (ok, human message).
+    """
+    ok, _ = _git(workspace, "rev-parse", "--verify", f"{sha}^{{commit}}")
+    if not ok:
+        return False, "checkpoint not found (was the run in a git repo?)"
+
+    # Files present now (tracked + untracked, .gitignore honoured).
+    ok, now = _git(workspace, "ls-files", "--cached", "--others", "--exclude-standard")
+    now_set = set(now.splitlines()) if ok else set()
+    ok, snap = _git(workspace, "ls-tree", "-r", "--name-only", sha)
+    if not ok:
+        return False, f"could not read snapshot: {snap[:160]}"
+    snap_set = set(snap.splitlines())
+
+    ok, out = _git(workspace, "restore", "--source", sha, "--worktree", "--", ".")
+    if not ok:
+        return False, f"restore failed: {out[:200]}"
+
+    removed = 0
+    from pathlib import Path
+    for rel in sorted(now_set - snap_set):
+        try:
+            (Path(workspace) / rel).unlink()
+            removed += 1
+        except OSError:
+            pass
+
+    msg = f"working tree restored to checkpoint {sha[:8]}"
+    if removed:
+        msg += f"; removed {removed} file(s) created since"
+    return True, msg

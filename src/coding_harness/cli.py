@@ -85,6 +85,11 @@ SLASH_COMMANDS: list[tuple[str, str, str]] = [
         "Export session transcript",
         "Write the session log to a file. Usage: /export [path] (default: wells-transcript-<ts>.md)",
     ),
+    (
+        "/undo",
+        "Revert everything the last run changed",
+        "Restore the working tree to the automatic pre-run checkpoint (git repos only).",
+    ),
 ]
 
 
@@ -149,6 +154,8 @@ def handle_slash_command(command: str) -> bool:
     elif cmd == "/export":
         # Intercepted by the TUI (which owns the transcript) before reaching here.
         console.print("[yellow]/export is only available inside the TUI.[/yellow]")
+    elif cmd == "/undo":
+        _handle_undo()
     else:
         console.print(f"[red]Unknown command: {command}[/red]")
         console.print("[dim]Type / for a list of commands.[/dim]")
@@ -351,6 +358,7 @@ def _run_auto(text: str, agent_state: dict, callbacks) -> None:
     LEDGER.reset()
     session_id = new_session_id()
     t0 = _time.time()
+    _save_undo_checkpoint()
 
     if resume_ctx:
         console.print("[dim]Continuing from previous session...[/dim]")
@@ -367,15 +375,22 @@ def _run_auto(text: str, agent_state: dict, callbacks) -> None:
         from coding_harness import index_tools
         index_tools.ensure_index(ctx.workspace, auto_build=True)
 
+    # Repo map in the (stable) system prefix: the model starts knowing where
+    # things live, and the stable position is prompt-cache friendly.
+    from coding_harness.repomap import repo_map_block
+    system_prefix = _AUTO_SYSTEM_PREFIX + repo_map_block(ctx.workspace)
+
     try:
         result = run_executor(
             task=effective_task,
             ctx=ctx,
-            system_prefix=_AUTO_SYSTEM_PREFIX,
+            system_prefix=system_prefix,
+            stream=config.STREAM_OUTPUT,
         )
 
         console.print()
-        if result.summary:
+        if result.summary and not result.streamed:
+            # Streamed answers already appeared live — don't print them twice.
             console.print(result.summary)
         console.print()
 
@@ -436,6 +451,7 @@ def _run_task(text: str, agent_state: dict, app, callbacks) -> None:
     LEDGER.reset()
     session_id = new_session_id()
     t0 = _time.time()
+    _save_undo_checkpoint()
 
     _NODE_LABELS = {
         "planner":   "[bold blue]Planning…[/bold blue]",
@@ -522,6 +538,57 @@ def _run_task(text: str, agent_state: dict, app, callbacks) -> None:
         from coding_harness.logger import log_error
         log_error(f"_run_task failed: {type(e).__name__}: {e}", e)
         console.print(f"\n[bold red]Error during execution:[/bold red] {e}")
+
+
+def _save_undo_checkpoint() -> None:
+    """Snapshot the working tree before a run so /undo can revert it."""
+    try:
+        from coding_harness import gitops
+        sha = gitops.snapshot_worktree(config.WORKSPACE_ROOT)
+        _REPL_STATE["undo_checkpoint"] = sha or None
+    except Exception:
+        _REPL_STATE["undo_checkpoint"] = None
+
+
+def undo_preview() -> tuple[str, str]:
+    """Return (checkpoint_sha, diff_stat vs now). Empty sha = nothing to undo."""
+    from coding_harness import gitops
+    sha = _REPL_STATE.get("undo_checkpoint") or ""
+    if not sha:
+        # Fall back to the persisted ref (survives restarts).
+        ok, out = gitops._git(config.WORKSPACE_ROOT, "rev-parse", "--verify",
+                              gitops._UNDO_REF)
+        sha = out.strip() if ok else ""
+    if not sha:
+        return "", ""
+    return sha, gitops.snapshot_diff_stat(config.WORKSPACE_ROOT, sha)
+
+
+def undo_apply(sha: str) -> tuple[bool, str]:
+    """Restore the working tree to ``sha`` (the pre-run checkpoint)."""
+    from coding_harness import gitops
+    return gitops.restore_snapshot(config.WORKSPACE_ROOT, sha)
+
+
+def _handle_undo() -> None:
+    """Plain-CLI /undo (the TUI intercepts this command with its own confirm)."""
+    sha, stat = undo_preview()
+    if not sha:
+        console.print("[yellow]No checkpoint to undo (no run yet, or not a git repo).[/yellow]")
+        return
+    if not stat:
+        console.print("[dim]Working tree already matches the last checkpoint — nothing to undo.[/dim]")
+        return
+    console.print(f"\n[bold]Reverting to pre-run checkpoint {sha[:8]}:[/bold]\n{stat}\n")
+    try:
+        confirm = input("Revert these changes? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return
+    if confirm in ("y", "yes"):
+        ok, msg = undo_apply(sha)
+        console.print(f"[green]{msg}[/green]" if ok else f"[red]{msg}[/red]")
+    else:
+        console.print("[dim]Cancelled.[/dim]")
 
 
 def _summarize_run(state: dict) -> str:

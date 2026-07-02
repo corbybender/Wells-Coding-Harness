@@ -623,6 +623,26 @@ class WellsApp(App[None]):
             self._export_transcript(" ".join(args))
             return
 
+        if cmd == "/undo":
+            from coding_harness.cli import undo_preview
+            sha, stat = undo_preview()
+            if not sha:
+                self.write_log(
+                    "[yellow]No checkpoint to undo (no run yet, or not a git repo).[/yellow]"
+                )
+                return
+            if not stat:
+                self.write_log(
+                    "[dim]Working tree already matches the last checkpoint — nothing to undo.[/dim]"
+                )
+                return
+            self.write_log(
+                f"\n[bold]Reverting to pre-run checkpoint {sha[:8]}:[/bold]\n{stat}\n"
+                "[dim]Type [bold]y[/bold] to revert or anything else to cancel.[/dim]"
+            )
+            self._pending = {"kind": "undo_confirm", "sha": sha}
+            return
+
         if cmd == "/sessions" and arg.lower() == "clear":
             all_ws = "--all" in [a.lower() for a in args]
             scope = "ALL workspaces" if all_ws else "this workspace"
@@ -723,6 +743,16 @@ class WellsApp(App[None]):
                 workspace = None if all_ws else config.WORKSPACE_ROOT
                 n = clear_sessions(workspace=workspace)
                 self.write_log(f"[green]Deleted {n} session(s).[/green]")
+            else:
+                self.write_log("[dim]Cancelled.[/dim]")
+
+        elif kind == "undo_confirm":
+            sha = self._pending["sha"]
+            self._pending = None
+            if text.lower() in ("y", "yes"):
+                from coding_harness.cli import undo_apply
+                ok, msg = undo_apply(sha)
+                self.write_log(f"[green]{msg}[/green]" if ok else f"[red]{msg}[/red]")
             else:
                 self.write_log("[dim]Cancelled.[/dim]")
 

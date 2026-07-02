@@ -135,6 +135,11 @@ HARNESS_SAFETY: str = os.getenv("HARNESS_SAFETY", "auto").strip().lower() or "au
 # Max tool-call steps in a single executor run before the loop is forced to stop.
 MAX_TOOL_STEPS: int = int(os.getenv("MAX_TOOL_STEPS", "60"))
 
+# Self-heal: after every write/edit, run the fastest available checker for
+# that file type (ruff/py_compile, node --check, json parse) and inject any
+# failure into the agent's next observation. Set 0 to disable.
+SELF_CHECK: bool = os.getenv("SELF_CHECK", "1") not in ("0", "false", "no", "")
+
 # Per-run token budget: hard cap on input+output tokens across one run
 # (all agents combined — the ledger is reset at run start). 0 disables the cap.
 # A warning is printed when a run crosses 80% of the budget.

@@ -370,6 +370,83 @@ def _grep_tool(
 # ---------------------------------------------------------------------------
 
 
+def _fuzzy_locate(text: str, old_string: str) -> tuple[tuple[int, int] | None, int]:
+    """Whitespace-tolerant unique match of ``old_string`` in ``text``.
+
+    Compares line-by-line with leading/trailing whitespace stripped, so an
+    old_string whose indentation the model got wrong still matches. Returns
+    ``((start_line, end_line), 1)`` on a unique match (0-based, end exclusive),
+    or ``(None, match_count)`` otherwise.
+    """
+    old_lines = [l.strip() for l in old_string.splitlines()]
+    if not old_lines:
+        return None, 0
+    file_stripped = [l.strip() for l in text.splitlines()]
+    n = len(old_lines)
+    hits = [
+        i
+        for i in range(len(file_stripped) - n + 1)
+        if file_stripped[i : i + n] == old_lines
+    ]
+    if len(hits) != 1:
+        return None, len(hits)
+    return (hits[0], hits[0] + n), 1
+
+
+def _reindent(new_string: str, file_first_line: str, old_first_line: str) -> str:
+    """Shift ``new_string``'s indentation by the delta between the file's actual
+    first matched line and the model's old_string first line."""
+    file_lead = file_first_line[: len(file_first_line) - len(file_first_line.lstrip())]
+    old_lead = old_first_line[: len(old_first_line) - len(old_first_line.lstrip())]
+    if file_lead == old_lead:
+        return new_string
+    out = []
+    for line in new_string.splitlines():
+        if not line.strip():
+            out.append(line)
+        elif old_lead and line.startswith(old_lead):
+            out.append(file_lead + line[len(old_lead):])
+        elif not old_lead:
+            out.append(file_lead + line)
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+_DIFF_MAX_LINES = 40
+
+
+def _emit_diff(path: str, before: str, after: str) -> None:
+    """Show a colorized unified diff of an applied edit in the activity log."""
+    import difflib
+
+    from rich.markup import escape
+
+    from coding_harness.control import ui
+
+    diff = list(
+        difflib.unified_diff(
+            before.splitlines(), after.splitlines(), lineterm="", n=2
+        )
+    )[2:]  # drop the ---/+++ header pair
+    if not diff:
+        return
+    shown = []
+    for d in diff[:_DIFF_MAX_LINES]:
+        e = escape(d)
+        if d.startswith("+"):
+            shown.append(f"    [green]{e}[/green]")
+        elif d.startswith("-"):
+            shown.append(f"    [red]{e}[/red]")
+        elif d.startswith("@@"):
+            shown.append(f"    [cyan dim]{e}[/cyan dim]")
+        else:
+            shown.append(f"    [dim]{e}[/dim]")
+    if len(diff) > _DIFF_MAX_LINES:
+        shown.append(f"    [dim]… {len(diff) - _DIFF_MAX_LINES} more diff lines[/dim]")
+    ui("diff", "\n".join(shown), path=path)
+
+
 def _write_file(ctx: ToolContext, path: str, content: str) -> ToolResult:
     """Create or overwrite a file with ``content``."""
     try:
@@ -386,8 +463,15 @@ def _write_file(ctx: ToolContext, path: str, content: str) -> ToolResult:
     if not decision.allowed:
         return ToolResult(True, decision.reason, simulated=decision.simulated)
 
+    before = ""
+    if resolved.exists():
+        try:
+            before = resolved.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            before = ""
     resolved.parent.mkdir(parents=True, exist_ok=True)
     resolved.write_text(content, encoding="utf-8")
+    _emit_diff(path, before, content)
     return ToolResult(True, f"Wrote {len(content)} chars to {path}")
 
 
@@ -416,8 +500,22 @@ def _edit_file(
 
     text = resolved.read_text(encoding="utf-8", errors="replace")
     count = text.count(old_string)
+    fuzzy_note = ""
+    fuzzy_span: tuple[int, int] | None = None
     if count == 0:
-        return ToolResult(False, "", f"old_string not found in {path}")
+        # Exact match failed — try whitespace-tolerant matching so an
+        # indentation slip doesn't burn a round-trip on a failed edit.
+        fuzzy_span, fuzzy_count = _fuzzy_locate(text, old_string)
+        if fuzzy_span is None:
+            hint = (
+                f" (it appears {fuzzy_count} times when ignoring whitespace; "
+                "provide a more specific old_string)"
+                if fuzzy_count > 1
+                else ""
+            )
+            return ToolResult(False, "", f"old_string not found in {path}{hint}")
+        count = 1
+        fuzzy_note = " [fuzzy-matched: whitespace differences ignored]"
     if count > 1 and not replace_all:
         return ToolResult(
             False,
@@ -439,13 +537,25 @@ def _edit_file(
     if not decision.allowed:
         return ToolResult(True, decision.reason, simulated=decision.simulated)
 
-    new_text = (
-        text.replace(old_string, new_string)
-        if replace_all
-        else text.replace(old_string, new_string, 1)
-    )
+    if fuzzy_span is not None:
+        lines = text.splitlines(keepends=True)
+        i, j = fuzzy_span
+        replacement = _reindent(
+            new_string, lines[i], old_string.splitlines()[0]
+        )
+        # Preserve the trailing newline of the matched block.
+        if lines[j - 1].endswith("\n") and not replacement.endswith("\n"):
+            replacement += "\n"
+        new_text = "".join(lines[:i]) + replacement + "".join(lines[j:])
+    else:
+        new_text = (
+            text.replace(old_string, new_string)
+            if replace_all
+            else text.replace(old_string, new_string, 1)
+        )
     resolved.write_text(new_text, encoding="utf-8")
-    return ToolResult(True, f"Edited {path} ({detail})")
+    _emit_diff(path, text, new_text)
+    return ToolResult(True, f"Edited {path} ({detail}){fuzzy_note}")
 
 
 def _run_command(ctx: ToolContext, command: str) -> ToolResult:
