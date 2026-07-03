@@ -126,22 +126,40 @@ class StatusBar(Static):
         if len(wd) > 36:
             wd = "…" + wd[-35:]
 
-        saved_s = f"  [dim]saved: {saved:,}[/dim]" if saved else ""
-        tokens_s = f"tokens: {used:,}{saved_s}"
+        saved_s = f" [dim]saved {saved:,}[/dim]" if saved else ""
+        cost_s = ""
+        try:
+            from coding_harness import pricing
+            c = pricing.fmt(pricing.run_cost())
+            if c:
+                cost_s = f" [bold]{c}[/bold]"
+        except Exception:
+            pass
+        tokens_s = f"tokens {used:,}{cost_s}{saved_s}"
 
         try:
             import coding_harness.cli as _cli
             state = _cli._REPL_STATE
             force = state.get("force_mode")
             busy_since = state.get("busy_since")
+            pinned = len(state.get("pinned") or [])
         except Exception:
             force = None
             busy_since = None
+            pinned = 0
 
-        if force == "task":
-            mode = "[bold magenta]mode: orchestrate[/bold magenta]"
+        # Operating mode: plan (read-only) / approve (confirm) / dryrun / auto.
+        if config.PLAN_MODE:
+            mode = "[bold yellow]mode: plan[/bold yellow]"
+        elif config.HARNESS_SAFETY == "approve":
+            mode = "[bold cyan]mode: approve[/bold cyan]"
+        elif config.HARNESS_SAFETY == "dryrun":
+            mode = "[bold magenta]mode: dryrun[/bold magenta]"
         else:
-            mode = "[dim]mode: auto[/dim]"
+            mode = "[green]mode: auto[/green]"
+
+        route_s = "  [bold magenta]route: orchestrate[/bold magenta]" if force == "task" else ""
+        pin_s = f"  [yellow]📌{pinned}[/yellow]" if pinned else ""
 
         if busy_since is not None:
             secs = int(_time.monotonic() - busy_since)
@@ -159,7 +177,7 @@ class StatusBar(Static):
             f"[dim]{wd}[/dim]  "
             f"[green]{model}[/green]  "
             f"[cyan]{tokens_s}[/cyan]{elapsed_s}  "
-            f"{mode}"
+            f"{mode}{route_s}{pin_s}"
         )
 
 
@@ -416,6 +434,7 @@ class WellsApp(App[None]):
             )
 
         self._ensure_repo_index()
+        self._connect_mcp_servers()
         self._input.focus()
 
     def on_unmount(self) -> None:
@@ -482,6 +501,32 @@ class WellsApp(App[None]):
                 self.write_log(f"[yellow]Index: {result}[/yellow]")
         except Exception:
             pass
+
+    def _connect_mcp_servers(self) -> None:
+        """Connect configured MCP servers in the background (never blocks UI)."""
+        from coding_harness.mcp_client import load_config
+
+        if not load_config():
+            return
+
+        def _connect() -> None:
+            try:
+                from coding_harness.mcp_client import register_mcp_tools
+                names = register_mcp_tools()
+                if names:
+                    self.call_from_thread(
+                        self.write_log,
+                        f"[green]MCP tools connected:[/green] [dim]{', '.join(names)}[/dim]",
+                    )
+            except Exception as e:
+                try:
+                    self.call_from_thread(
+                        self.write_log, f"[yellow]MCP connect failed: {e}[/yellow]"
+                    )
+                except Exception:
+                    pass
+
+        threading.Thread(target=_connect, name="wells-mcp-connect", daemon=True).start()
 
     # ------------------------------------------------------------------
     # Prompt history
@@ -826,6 +871,10 @@ class WellsApp(App[None]):
     def _start_run(self, text: str) -> None:
         import coding_harness.cli as _cli
         CONTROL.reset()
+        # Pick up /mode and /working-dir changes made since the last run.
+        self._agent_state["safety"] = config.HARNESS_SAFETY
+        self._agent_state["plan_mode"] = config.PLAN_MODE
+        self._agent_state["workspace_root"] = config.WORKSPACE_ROOT
         self._busy = True
         self._input.disabled = True
         self._input.placeholder = "Working…"

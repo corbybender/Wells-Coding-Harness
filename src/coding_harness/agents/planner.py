@@ -67,7 +67,7 @@ def planner(state: dict) -> dict:
     # Repo map: start the planner knowing where things live instead of
     # spending tool steps on discovery.
     from coding_harness.repomap import repo_map_block
-    map_block = repo_map_block(workspace or "")
+    map_block = repo_map_block(workspace or "", goal=goal)
 
     # Weave in project memory so the planner knows established facts
     # about this repo (file layout, conventions, prior gotchas).

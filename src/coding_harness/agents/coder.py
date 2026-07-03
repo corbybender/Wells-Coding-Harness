@@ -81,7 +81,7 @@ def coder(state: dict) -> dict:
         context=_build_context_block(state),
         feedback=feedback,
         memory=mem_block,
-        repo_map=repo_map_block(ctx.workspace),
+        repo_map=repo_map_block(ctx.workspace, goal=state.get("goal", "")),
     )
 
     result = run_executor(

@@ -888,6 +888,18 @@ def get_tool(name: str) -> ToolDef | None:
     return _TOOLS_BY_NAME.get(name)
 
 
+def register_external(defs: list[ToolDef]) -> None:
+    """Register externally-provided tools (MCP client) into the default toolset.
+
+    Added to ALL_TOOLS only — read-only registries (planner/subagents) are not
+    extended, so external tools stay confined to the main executor loop.
+    """
+    for t in defs:
+        if t.name not in _TOOLS_BY_NAME:
+            ALL_TOOLS.append(t)
+            _TOOLS_BY_NAME[t.name] = t
+
+
 def registry(*, include_mutating: bool = True) -> list[ToolDef]:
     """Return the available tools. Pass include_mutating=False for a read-only set."""
     return ALL_TOOLS if include_mutating else READ_TOOLS

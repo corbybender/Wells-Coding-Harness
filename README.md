@@ -177,7 +177,23 @@ wells --workspace . --safety approve info   # show config for THIS dir, approve 
 wells --workspace ../other-repo config      # edit settings (writes .env in repo root)
 ```
 
-Running `wells` with no arguments opens a rich, interactive chat REPL (similar to Claude Code or OpenCode). It maintains conversational context across multiple goals and streams output tokens live to your terminal. Inside the REPL, you can type your goals naturally or use slash commands (`/help`, `/config`, `/info`, `/plan`, `/quit`).
+Running `wells` with no arguments opens a rich, interactive TUI (similar to Claude Code or OpenCode). It maintains conversational context across multiple goals and streams output tokens live to your terminal. Type goals naturally, or use slash commands:
+
+| Command | What it does |
+|---|---|
+| `/mode plan\|approve\|auto\|dryrun` | Switch operating mode (read-only / confirm each change / full autonomy / simulate) |
+| `/add <path>` / `/drop <path>` / `/context` | Pin files into every prompt (guaranteed context) |
+| `/undo` | Revert everything the last run changed (automatic pre-run git checkpoint) |
+| `/orchestrate` | Route the next message through the full planner→coder→tester→reviewer graph |
+| `/resume` / `/sessions` | Continue a previous session / browse history |
+| `/index` | Build or refresh the structural repo index |
+| `/doctor` | Diagnose the environment (model, TLS, index, git, checkers) |
+| `/export [path]` | Save the session transcript to a file |
+| `/status` `/config` `/help` `/quit` | Status panel, settings, command list, exit |
+
+The status bar always shows workspace, model, live token count + dollar cost, operating mode, and (while running) the current agent activity — Escape cancels a running task, ↑/↓ recall prompt history, Shift+Enter inserts a newline.
+
+External MCP servers can be plugged in via `MCP_SERVERS` (JSON) or `~/.wells/mcp.json` — their tools appear to the agent as `mcp_<server>_<tool>`. Opt-in `AUTO_COMMIT=1` commits each successful run with a generated Conventional Commits message.
 
 ### Interactive settings menu
 

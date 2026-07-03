@@ -135,6 +135,15 @@ HARNESS_SAFETY: str = os.getenv("HARNESS_SAFETY", "auto").strip().lower() or "au
 # Max tool-call steps in a single executor run before the loop is forced to stop.
 MAX_TOOL_STEPS: int = int(os.getenv("MAX_TOOL_STEPS", "60"))
 
+# Auto-commit (opt-in): after each successful auto-mode run that changed the
+# working tree, create a git commit with an LLM-generated Conventional Commits
+# message and a Wells authorship trailer. /undo still works (checkpoint ref).
+AUTO_COMMIT: bool = os.getenv("AUTO_COMMIT", "0") not in ("0", "false", "no", "")
+
+# Route the tester/reviewer verification agents to the cheap model profile
+# when one is configured (they are judgment-light relative to the coder).
+CHEAP_VERIFY: bool = os.getenv("CHEAP_VERIFY", "1") not in ("0", "false", "no", "")
+
 # Self-heal: after every write/edit, run the fastest available checker for
 # that file type (ruff/py_compile, node --check, json parse) and inject any
 # failure into the agent's next observation. Set 0 to disable.

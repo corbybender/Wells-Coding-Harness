@@ -122,6 +122,7 @@ def tester(state: dict) -> dict:
         ground_truth=ground_truth,
     )
 
+    from coding_harness import config as _config
     result = run_executor(
         task=task,
         ctx=ctx,
@@ -129,6 +130,8 @@ def tester(state: dict) -> dict:
         max_steps=8,
         step_label="tester",
         temperature=0.0,
+        # Verification is judgment-light — route to the cheap profile when set.
+        profile=_config.cheap_profile_name() if _config.CHEAP_VERIFY else None,
     )
 
     print(f"[tester] done: {result.steps_taken} steps, reason={result.stopped_reason}")

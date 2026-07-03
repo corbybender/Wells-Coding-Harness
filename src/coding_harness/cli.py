@@ -90,6 +90,33 @@ SLASH_COMMANDS: list[tuple[str, str, str]] = [
         "Revert everything the last run changed",
         "Restore the working tree to the automatic pre-run checkpoint (git repos only).",
     ),
+    (
+        "/mode",
+        "Switch operating mode",
+        "Usage: /mode [plan|approve|auto|dryrun]. plan = read-only, approve = confirm "
+        "each write/command, auto = full autonomy, dryrun = simulate everything.",
+    ),
+    (
+        "/add",
+        "Pin a file into every prompt",
+        "Usage: /add <path>. Pinned files are injected into the context of every run "
+        "until dropped — guaranteed context instead of hoping the agent reads them.",
+    ),
+    (
+        "/drop",
+        "Unpin a file (or all)",
+        "Usage: /drop <path>|all.",
+    ),
+    (
+        "/context",
+        "Show pinned files and their token cost",
+        "Lists files added with /add, with per-file token estimates.",
+    ),
+    (
+        "/doctor",
+        "Diagnose the environment",
+        "Checks model reachability, API key, TLS, repo index health, git, and fast checkers.",
+    ),
 ]
 
 
@@ -156,6 +183,16 @@ def handle_slash_command(command: str) -> bool:
         console.print("[yellow]/export is only available inside the TUI.[/yellow]")
     elif cmd == "/undo":
         _handle_undo()
+    elif cmd == "/mode":
+        _handle_mode(arg)
+    elif cmd == "/add":
+        _handle_add(arg)
+    elif cmd == "/drop":
+        _handle_drop(arg)
+    elif cmd == "/context":
+        _handle_context()
+    elif cmd == "/doctor":
+        _handle_doctor()
     else:
         console.print(f"[red]Unknown command: {command}[/red]")
         console.print("[dim]Type / for a list of commands.[/dim]")
@@ -355,6 +392,11 @@ def _run_auto(text: str, agent_state: dict, callbacks) -> None:
             f"Current request:\n{text}"
         )
 
+    # User-pinned files (/add) are guaranteed context.
+    pin_block = _pinned_context_block()
+    if pin_block:
+        effective_task = f"{pin_block}\n{effective_task}"
+
     LEDGER.reset()
     session_id = new_session_id()
     t0 = _time.time()
@@ -375,10 +417,10 @@ def _run_auto(text: str, agent_state: dict, callbacks) -> None:
         from coding_harness import index_tools
         index_tools.ensure_index(ctx.workspace, auto_build=True)
 
-    # Repo map in the (stable) system prefix: the model starts knowing where
-    # things live, and the stable position is prompt-cache friendly.
+    # Repo map in the system prefix: the model starts knowing where things
+    # live, ranked by relevance to this goal.
     from coding_harness.repomap import repo_map_block
-    system_prefix = _AUTO_SYSTEM_PREFIX + repo_map_block(ctx.workspace)
+    system_prefix = _AUTO_SYSTEM_PREFIX + repo_map_block(ctx.workspace, goal=text)
 
     try:
         result = run_executor(
@@ -396,9 +438,12 @@ def _run_auto(text: str, agent_state: dict, callbacks) -> None:
 
         t = LEDGER.totals()
         total = t["input"] + t["output"]
+        from coding_harness import pricing
+        cost_s = pricing.fmt(pricing.run_cost())
+        cost_part = f" · {cost_s}" if cost_s else ""
         console.print(
             f"[dim]{result.steps_taken} step(s) · {total:,} tokens "
-            f"({t['input']:,} in / {t['output']:,} out)[/dim]"
+            f"({t['input']:,} in / {t['output']:,} out){cost_part}[/dim]"
         )
 
         try:
@@ -426,10 +471,48 @@ def _run_auto(text: str, agent_state: dict, callbacks) -> None:
             f"Goal: {original_goal}\nResult: {result.summary[:400]}"
         )
 
+        if config.AUTO_COMMIT and result.stopped_reason == "done":
+            _maybe_auto_commit(original_goal, result.summary)
+
     except Exception as e:
         from coding_harness.logger import log_error
         log_error(f"_run_auto failed: {type(e).__name__}: {e}", e)
         console.print(f"\n[bold red]Error:[/bold red] {e}")
+
+
+def _maybe_auto_commit(goal: str, summary: str) -> None:
+    """Commit the run's changes with an LLM-generated conventional message."""
+    from coding_harness import gitops
+
+    ckpt = _REPL_STATE.get("undo_checkpoint") or ""
+    stat = gitops.snapshot_diff_stat(config.WORKSPACE_ROOT, ckpt) if ckpt else ""
+    if ckpt and not stat:
+        return  # run changed nothing
+
+    message = ""
+    try:
+        prompt = (
+            "Write a git commit message for the change below. Conventional Commits "
+            "format (type(scope): subject). Subject line <= 65 chars, imperative "
+            "mood. Add a 1-2 line body ONLY if the why isn't obvious. Reply with "
+            "the message only — no fences, no commentary.\n\n"
+            f"GOAL:\n{goal[:400]}\n\nWHAT WAS DONE:\n{summary[:600]}\n\n"
+            f"DIFF STAT:\n{stat[:500]}"
+        )
+        from langchain_core.messages import HumanMessage
+        llm = config.get_llm_for_task("summarization", temperature=0.1)
+        resp = config._invoke_with_retry(llm, [HumanMessage(content=prompt)])
+        message = (resp.content or "").strip().strip("`")
+    except Exception:
+        pass
+    if not message:
+        message = f"chore(wells): {goal.strip()[:60]}"
+
+    ok, sha = gitops.auto_commit(config.WORKSPACE_ROOT, message)
+    if ok and sha:
+        console.print(f"[dim]auto-committed {sha}: {message.splitlines()[0][:70]}[/dim]")
+    elif not ok:
+        console.print(f"[yellow]auto-commit failed: {sha}[/yellow]")
 
 
 def _run_task(text: str, agent_state: dict, app, callbacks) -> None:
@@ -446,6 +529,9 @@ def _run_task(text: str, agent_state: dict, app, callbacks) -> None:
     effective_goal = (
         f"{resume_ctx}\n\nCONTINUED GOAL:\n{text}" if resume_ctx else text
     )
+    pin_block = _pinned_context_block()
+    if pin_block:
+        effective_goal = f"{pin_block}\n{effective_goal}"
     agent_state["goal"] = effective_goal
     agent_state["iteration"] = 0
     LEDGER.reset()
@@ -511,10 +597,13 @@ def _run_task(text: str, agent_state: dict, app, callbacks) -> None:
 
         t = LEDGER.totals()
         total = t["input"] + t["output"]
+        from coding_harness import pricing
+        cost_s = pricing.fmt(pricing.run_cost())
+        cost_part = f" · {cost_s}" if cost_s else ""
         console.print(
             f"\n[dim][tokens] {total:,} total "
             f"({t['input']:,} in / {t['output']:,} out) "
-            f"across {t['calls']} calls[/dim]"
+            f"across {t['calls']} calls{cost_part}[/dim]"
         )
 
         # Save session.
@@ -538,6 +627,254 @@ def _run_task(text: str, agent_state: dict, app, callbacks) -> None:
         from coding_harness.logger import log_error
         log_error(f"_run_task failed: {type(e).__name__}: {e}", e)
         console.print(f"\n[bold red]Error during execution:[/bold red] {e}")
+
+
+_MODES = {
+    "plan":    ("1", None),        # PLAN_MODE, HARNESS_SAFETY (None = leave as-is)
+    "approve": ("0", "approve"),
+    "auto":    ("0", "auto"),
+    "dryrun":  ("0", "dryrun"),
+}
+
+
+def current_mode() -> str:
+    if config.PLAN_MODE:
+        return "plan"
+    return config.HARNESS_SAFETY if config.HARNESS_SAFETY in ("approve", "dryrun") else "auto"
+
+
+def _handle_mode(arg: str) -> None:
+    """Switch operating mode: plan | approve | auto | dryrun."""
+    want = arg.strip().lower()
+    if not want:
+        console.print(
+            f"\nOperating mode: [bold]{current_mode()}[/bold]\n"
+            "[dim]  plan    — read-only: investigate and describe, never change\n"
+            "  approve — apply changes, but confirm each write/command\n"
+            "  auto    — full autonomy inside the workspace\n"
+            "  dryrun  — simulate every mutation\n"
+            "Usage: /mode <plan|approve|auto|dryrun>[/dim]\n"
+        )
+        return
+    if want not in _MODES:
+        console.print(f"[red]Unknown mode: {want}[/red] [dim](plan|approve|auto|dryrun)[/dim]")
+        return
+    plan, safety_v = _MODES[want]
+    os.environ["PLAN_MODE"] = plan
+    if safety_v:
+        os.environ["HARNESS_SAFETY"] = safety_v
+    _reload_module_config()
+    labels = {
+        "plan": "[bold yellow]plan[/bold yellow] — read-only",
+        "approve": "[bold cyan]approve[/bold cyan] — confirm each write/command",
+        "auto": "[bold green]auto[/bold green] — full autonomy",
+        "dryrun": "[bold magenta]dryrun[/bold magenta] — simulate everything",
+    }
+    console.print(f"Operating mode: {labels[want]}")
+
+
+def _pinned() -> list[str]:
+    return _REPL_STATE.setdefault("pinned", [])
+
+
+def _handle_add(arg: str) -> None:
+    """Pin a file into the context of every run."""
+    if not arg.strip():
+        console.print("[red]Usage: /add <path>[/red]")
+        return
+    rel = arg.strip().strip('"')
+    p = Path(config.WORKSPACE_ROOT) / rel
+    if not p.is_file():
+        console.print(f"[red]Not a file: {rel}[/red]")
+        return
+    pinned = _pinned()
+    if rel in pinned:
+        console.print(f"[dim]{rel} is already pinned.[/dim]")
+        return
+    pinned.append(rel)
+    from coding_harness.tokens import estimate_tokens
+    try:
+        tok = estimate_tokens(p.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        tok = 0
+    console.print(
+        f"[green]Pinned {rel}[/green] [dim](~{tok:,} tokens — injected into every run "
+        f"until /drop)[/dim]"
+    )
+
+
+def _handle_drop(arg: str) -> None:
+    pinned = _pinned()
+    rel = arg.strip().strip('"')
+    if not rel:
+        console.print("[red]Usage: /drop <path>|all[/red]")
+        return
+    if rel.lower() == "all":
+        n = len(pinned)
+        pinned.clear()
+        console.print(f"[green]Dropped {n} pinned file(s).[/green]")
+        return
+    if rel in pinned:
+        pinned.remove(rel)
+        console.print(f"[green]Dropped {rel}[/green]")
+    else:
+        console.print(f"[yellow]Not pinned: {rel}[/yellow] [dim](see /context)[/dim]")
+
+
+def _handle_context() -> None:
+    from rich.table import Table
+    from coding_harness.tokens import estimate_tokens
+
+    pinned = _pinned()
+    if not pinned:
+        console.print("[dim]No pinned files. Use /add <path> to pin one.[/dim]")
+        return
+    table = Table(show_header=True, header_style="bold cyan", expand=False)
+    table.add_column("Pinned file")
+    table.add_column("Tokens", justify="right")
+    total = 0
+    for rel in pinned:
+        p = Path(config.WORKSPACE_ROOT) / rel
+        try:
+            tok = estimate_tokens(p.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            tok = 0
+        total += tok
+        table.add_row(rel, f"{tok:,}")
+    table.add_row("[bold]total[/bold]", f"[bold]{total:,}[/bold]")
+    console.print(table)
+
+
+_PIN_FILE_TOKEN_CAP = 4000     # per-file trim threshold
+_PIN_TOTAL_TOKEN_WARN = 10000  # warn when pinned block gets expensive
+
+
+def _pinned_context_block() -> str:
+    """Render pinned files as a prompt block ('' when nothing pinned)."""
+    from coding_harness.tokens import estimate_tokens
+
+    pinned = _pinned()
+    if not pinned:
+        return ""
+    parts = ["PINNED CONTEXT FILES (user pinned these; treat as authoritative):"]
+    total = 0
+    for rel in pinned:
+        p = Path(config.WORKSPACE_ROOT) / rel
+        try:
+            body = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        tok = estimate_tokens(body)
+        if tok > _PIN_FILE_TOKEN_CAP:
+            lines = body.splitlines()
+            keep = max(50, int(len(lines) * _PIN_FILE_TOKEN_CAP / tok))
+            body = "\n".join(lines[:keep]) + f"\n… (trimmed; {len(lines) - keep} more lines — read_file for the rest)"
+            tok = estimate_tokens(body)
+        total += tok
+        parts.append(f"\n--- {rel} ---\n{body}")
+    if total > _PIN_TOTAL_TOKEN_WARN:
+        console.print(
+            f"[yellow]⚠ pinned context is ~{total:,} tokens per run — "
+            f"consider /drop for files you no longer need.[/yellow]"
+        )
+    return "\n".join(parts) + "\n"
+
+
+def _handle_doctor() -> None:
+    """Environment diagnostic: model, key, TLS, index, git, checkers."""
+    import shutil as _shutil
+    from rich.table import Table
+
+    table = Table(show_header=True, header_style="bold cyan", expand=False)
+    table.add_column("Check", no_wrap=True)
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Detail")
+    OK = "[green]✓[/green]"
+    WARN = "[yellow]⚠[/yellow]"
+    FAIL = "[red]✗[/red]"
+
+    # Provider profile + API key
+    profile = config.providers.load_profile(config.ACTIVE_PROFILE)
+    if profile is None:
+        table.add_row("model profile", FAIL, f"profile {config.ACTIVE_PROFILE!r} not configured")
+    else:
+        key_s = "key set" if profile.api_key else "[yellow]no API key[/yellow]"
+        table.add_row("model profile", OK, f"{profile.label()} ({key_s})")
+
+    # Model reachability (one tiny call)
+    with console.status("[cyan]Pinging model…[/cyan]"):
+        try:
+            t0 = _time.monotonic()
+            llm = config.get_llm_for_task("classification")
+            from langchain_core.messages import HumanMessage
+            resp = llm.invoke([HumanMessage(content="Reply with the word: pong")])
+            ms = int((_time.monotonic() - t0) * 1000)
+            ok_ping = bool((resp.content or "").strip())
+            table.add_row("model reachable", OK if ok_ping else WARN, f"{ms} ms round-trip")
+        except Exception as e:
+            table.add_row("model reachable", FAIL, f"{type(e).__name__}: {str(e)[:80]}")
+
+    # TLS trust
+    try:
+        import truststore  # noqa: F401
+        table.add_row("tls trust", OK, "truststore (OS certificate store)")
+    except Exception:
+        bundle = os.environ.get("SSL_CERT_FILE", "")
+        table.add_row(
+            "tls trust", OK if bundle else WARN,
+            f"SSL_CERT_FILE={bundle}" if bundle else "no truststore; certifi fallback",
+        )
+
+    # Repo index health
+    try:
+        from coding_harness.index_tools import INDEXER_AVAILABLE, index_status
+        if not INDEXER_AVAILABLE:
+            table.add_row("repo index", WARN, "wells-index not installed — grep fallback")
+        else:
+            st = index_status(config.WORKSPACE_ROOT)
+            if st.get("error"):
+                table.add_row("repo index", FAIL, st["error"][:80])
+            elif not st["exists"]:
+                table.add_row("repo index", WARN, "not built yet — /index to build")
+            elif st["total_files"] > 0 and st["total_symbols"] == 0:
+                table.add_row(
+                    "repo index", FAIL,
+                    "files indexed but 0 symbols — stale native core; rebuild wells-index",
+                )
+            else:
+                age = st.get("age_hours")
+                age_s = f", {age:.0f}h old" if age is not None else ""
+                table.add_row(
+                    "repo index", OK,
+                    f"{st['total_symbols']:,} symbols / {st['total_files']:,} files{age_s}",
+                )
+    except Exception as e:
+        table.add_row("repo index", FAIL, str(e)[:80])
+
+    # Git + checkpointing
+    if _shutil.which("git"):
+        from coding_harness import gitops
+        ok_repo, out = gitops._git(config.WORKSPACE_ROOT, "rev-parse", "--is-inside-work-tree")
+        in_repo = ok_repo and "true" in out.lower()
+        table.add_row(
+            "git", OK if in_repo else WARN,
+            "workspace is a git repo (/undo available)" if in_repo
+            else "workspace not a git repo — /undo disabled",
+        )
+    else:
+        table.add_row("git", WARN, "git not on PATH — checkpoints and /undo disabled")
+
+    # Fast checkers (self-heal)
+    found = [c for c in ("ruff", "node") if _shutil.which(c)]
+    detail = ", ".join(found) if found else "none — python falls back to py_compile"
+    table.add_row("fast checkers", OK if found else WARN, detail)
+
+    # Pinned files still exist
+    missing = [r for r in _pinned() if not (Path(config.WORKSPACE_ROOT) / r).is_file()]
+    if missing:
+        table.add_row("pinned files", WARN, f"missing: {', '.join(missing[:5])}")
+
+    console.print(table)
 
 
 def _save_undo_checkpoint() -> None:

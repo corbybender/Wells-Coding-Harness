@@ -73,6 +73,7 @@ def reviewer(state: dict) -> dict:
         tests=state.get("test_results") or state.get("test_plan", "") or "(not run)",
     )
 
+    from coding_harness import config as _config
     result = run_executor(
         task=task,
         ctx=ctx,
@@ -80,6 +81,8 @@ def reviewer(state: dict) -> dict:
         max_steps=10,
         step_label="reviewer",
         temperature=0.0,
+        # Verification is judgment-light — route to the cheap profile when set.
+        profile=_config.cheap_profile_name() if _config.CHEAP_VERIFY else None,
     )
 
     text = result.summary

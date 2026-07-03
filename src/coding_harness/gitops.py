@@ -322,6 +322,27 @@ def snapshot_diff_stat(workspace: str, sha: str) -> str:
     return out.strip() if ok else ""
 
 
+def auto_commit(workspace: str, message: str) -> tuple[bool, str]:
+    """Stage everything and commit with ``message`` + Wells authorship trailer.
+
+    Used by the opt-in AUTO_COMMIT flow after a successful run. Returns
+    (ok, short sha or error). No-op success when there is nothing to commit.
+    """
+    ok, out = _git(workspace, "status", "--porcelain")
+    if not ok:
+        return False, out[:120]
+    if not out.strip():
+        return True, ""
+    if not _git(workspace, "add", "-A")[0]:
+        return False, "git add failed"
+    full = message.rstrip() + "\n\nCo-Authored-By: Wells Agent <wells@noreply.local>"
+    ok, out = _git(workspace, "commit", "--no-verify", "-m", full)
+    if not ok:
+        return False, out[:160]
+    ok, sha = _git(workspace, "rev-parse", "--short", "HEAD")
+    return True, sha.strip() if ok else ""
+
+
 def restore_snapshot(workspace: str, sha: str) -> tuple[bool, str]:
     """Restore the working tree to snapshot ``sha``.
 
