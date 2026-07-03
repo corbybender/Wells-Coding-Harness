@@ -36,7 +36,8 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.message import Message
-from textual.widgets import OptionList, RichLog, Static, TextArea
+from textual.screen import ModalScreen
+from textual.widgets import Input, OptionList, RichLog, Static, TextArea
 from textual.widgets._option_list import Option
 
 from coding_harness import chat, config
@@ -238,6 +239,151 @@ class PromptInput(TextArea):
                 return
 
         await super()._on_key(event)
+
+
+# ---------------------------------------------------------------------------
+# Settings modal (/config) — replaces the stdin menu, which would deadlock
+# the event loop (Textual owns stdin, so input() never returns).
+# ---------------------------------------------------------------------------
+
+class SettingsScreen(ModalScreen["dict | None"]):
+    """Modal settings editor over the ``settings.SETTINGS`` schema.
+
+    Enter on a row edits it; Enter commits the value; Escape backs out of the
+    edit, then closes the panel. Dismisses with the staged {key: value}
+    changes (or None) — the app persists them to .env and reloads config.
+    """
+
+    CSS = """
+    SettingsScreen {
+        align: center middle;
+    }
+    #settings-panel {
+        width: 96;
+        max-width: 96%;
+        height: 80%;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    #settings-title {
+        height: 1;
+        text-style: bold;
+    }
+    #settings-list {
+        height: 1fr;
+        border: none;
+    }
+    #settings-help {
+        height: 2;
+        color: $text-muted;
+    }
+    #settings-input {
+        display: none;
+        height: 3;
+    }
+    """
+
+    BINDINGS = [Binding("escape", "back", "Back / close", priority=True)]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._staged: dict[str, str] = {}
+        self._editing = None  # settings.Setting | None
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="settings-panel"):
+            yield Static("Wells Settings  [dim](Enter: edit · Esc: close & save)[/dim]",
+                         id="settings-title", markup=True)
+            yield OptionList(id="settings-list")
+            yield Static("", id="settings-help", markup=True)
+            yield Input(id="settings-input")
+
+    def on_mount(self) -> None:
+        self._populate()
+        self.query_one("#settings-list", OptionList).focus()
+
+    def _display_value(self, s) -> str:
+        from coding_harness import settings as settings_mod
+        v = self._staged.get(s.key, settings_mod.current_value(s))
+        shown = settings_mod.mask(v) if s.secret else (v or "(default)")
+        if len(shown) > 42:
+            shown = shown[:41] + "…"
+        return shown
+
+    def _populate(self) -> None:
+        from coding_harness import settings as settings_mod
+
+        lst = self.query_one("#settings-list", OptionList)
+        highlighted = lst.highlighted
+        lst.clear_options()
+        seen_cat = None
+        for s in settings_mod.SETTINGS:
+            if s.category != seen_cat:
+                seen_cat = s.category
+                lst.add_option(Option(f"[bold cyan]── {s.category} ──[/bold cyan]",
+                                      id=f"_cat_{s.category}", disabled=True))
+            star = "[yellow]*[/yellow]" if s.key in self._staged else " "
+            lst.add_option(Option(
+                f"{star}{s.key:<28} [green]{self._display_value(s)}[/green]  "
+                f"[dim]{s.label}[/dim]",
+                id=s.key,
+            ))
+        if highlighted is not None:
+            lst.highlighted = min(highlighted, lst.option_count - 1)
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        from coding_harness import settings as settings_mod
+
+        event.stop()  # don't bubble to the app's command-popup handler
+        key = event.option_id or ""
+        s = settings_mod.SETTINGS_BY_KEY.get(key)
+        if s is None:
+            return
+        self._editing = s
+        help_widget = self.query_one("#settings-help", Static)
+        choices = f"  [bold]choices:[/bold] {', '.join(s.choices)}" if s.choices else ""
+        help_widget.update(f"[bold]{s.key}[/bold] — {s.help}{choices}")
+        box = self.query_one("#settings-input", Input)
+        current = self._staged.get(key, settings_mod.current_value(s))
+        box.value = "" if s.secret else current
+        box.placeholder = (
+            "(hidden — type a new value, Enter to keep current)" if s.secret
+            else "new value (Enter to commit, Esc to cancel)"
+        )
+        box.display = True
+        box.focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        from coding_harness import settings as settings_mod
+
+        event.stop()
+        s = self._editing
+        if s is None:
+            return
+        value = event.value.strip()
+        if s.choices and value and value not in s.choices:
+            self.query_one("#settings-help", Static).update(
+                f"[red]{s.key} must be one of: {', '.join(s.choices)}[/red]"
+            )
+            return
+        if value and value != settings_mod.current_value(s):
+            self._staged[s.key] = value
+        self._close_editor()
+        self._populate()
+
+    def _close_editor(self) -> None:
+        self._editing = None
+        box = self.query_one("#settings-input", Input)
+        box.display = False
+        self.query_one("#settings-help", Static).update("")
+        self.query_one("#settings-list", OptionList).focus()
+
+    def action_back(self) -> None:
+        if self._editing is not None:
+            self._close_editor()
+        else:
+            self.dismiss(self._staged or None)
 
 
 # ---------------------------------------------------------------------------
@@ -665,6 +811,12 @@ class WellsApp(App[None]):
             self._start_resume_picker(arg)
             return
 
+        if cmd == "/config":
+            # settings.interactive_menu() blocks on input() — deadlocks under
+            # Textual. Open the modal settings panel instead.
+            self._open_settings()
+            return
+
         if cmd == "/export":
             self._export_transcript(" ".join(args))
             return
@@ -710,6 +862,30 @@ class WellsApp(App[None]):
 
         if not keep_running:
             self.exit()
+
+    def _open_settings(self) -> None:
+        def _done(staged: dict | None) -> None:
+            if not staged:
+                self.write_log("[dim]Settings closed — no changes.[/dim]")
+                return
+            from pathlib import Path as _Path
+
+            from coding_harness import settings as settings_mod
+            from coding_harness.main import _reload_module_config
+
+            settings_mod.apply_changes(staged)
+            try:
+                settings_mod.update_env_file(_Path(".env"), staged)
+                where = "applied + saved to .env"
+            except Exception as e:
+                where = f"applied live (could not write .env: {e})"
+            _reload_module_config()
+            self.write_log(
+                f"[green]Settings {where}:[/green] "
+                f"[dim]{', '.join(sorted(staged))}[/dim]"
+            )
+
+        self.push_screen(SettingsScreen(), _done)
 
     def _export_transcript(self, arg: str) -> None:
         """Write the full session log to a plain-text/markdown file."""
