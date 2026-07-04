@@ -217,3 +217,78 @@ def test_quiet_executor_emits_no_ui_events(tmp_path):
         CONTROL.set_listener(None)
     assert result.stopped_reason == "done"
     assert seen == []  # quiet run emitted nothing
+
+
+# ---------------------------------------------------------------------------
+# Latency cuts: ops routing, auto-approve fast path, /steer injection
+# ---------------------------------------------------------------------------
+
+
+def test_ops_verbs_route_to_auto():
+    from coding_harness.chat import classify_intent
+    for text in [
+        "push the previous changes up to our azure app service",
+        "deploy the site to production",
+        "publish the package to npm",
+        "restart the api service",
+        "please push the build to the platform",
+    ]:
+        assert classify_intent(text, use_llm_fallback=False) == "auto", text
+
+
+def test_route_after_tests_auto_approve_finalizes():
+    state = {"tests_passed": True, "review_complete": True}
+    assert _route_after_tests(state) == "finalize"
+    # Green but complex (tester didn't auto-approve) still goes to review.
+    assert _route_after_tests({"tests_passed": True}) == "review"
+
+
+def test_tester_auto_approves_simple_green(tmp_path: Path):
+    with patch.object(tester, "_run_deterministic_gate", return_value=(True, "1 passed")):
+        out = tester.tester({
+            "workspace_root": str(tmp_path),
+            "plan_complexity": "simple",
+        })
+    assert out["tests_passed"] is True
+    assert out["review_complete"] is True
+    with patch.object(tester, "_run_deterministic_gate", return_value=(True, "1 passed")):
+        out2 = tester.tester({
+            "workspace_root": str(tmp_path),
+            "plan_complexity": "complex",
+        })
+    assert "review_complete" not in out2  # complex still gets reviewed
+
+
+def test_steer_injected_into_next_round(tmp_path: Path):
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from coding_harness import config, executor
+    from coding_harness.control import CONTROL
+    from coding_harness.tokens import LEDGER
+
+    LEDGER.reset()
+    CONTROL.reset()
+    seen_steer_at_call = []
+
+    responses = iter([
+        AIMessage(content='<tool_call>{"name": "list_dir", "args": {}}</tool_call>'),
+        AIMessage(content="done"),
+    ])
+
+    def fake_invoke(llm, messages):
+        seen_steer_at_call.append(any(
+            isinstance(m, HumanMessage) and "USER STEER" in (m.content or "")
+            for m in messages
+        ))
+        return next(responses)
+
+    ctx = tools.ToolContext(workspace=str(tmp_path), safety="auto")
+    CONTROL.add_steer("switch to SQLite instead")
+    with (
+        patch.object(config, "_invoke_with_retry", side_effect=fake_invoke),
+        patch.object(executor, "_try_bind_tools", return_value=None),
+    ):
+        executor.run_executor(task="x", ctx=ctx, max_steps=4, step_label="t")
+    # The steer was present in the messages of the first (and later) calls.
+    assert seen_steer_at_call and seen_steer_at_call[0] is True
+    assert CONTROL.pending_steers() == 0

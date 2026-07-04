@@ -46,6 +46,14 @@ _ORCHESTRATE_SCOPE = {
 }
 
 
+# Ops/deploy verbs: these are execution tasks, not design tasks. A planning
+# pass adds minutes and zero value — the direct executor handles them.
+_OPS_VERBS = {
+    "push", "deploy", "publish", "upload", "release", "restart", "install",
+    "commit", "merge", "sync", "run", "start", "stop", "ship",
+}
+
+
 def _heuristic_classify(text: str) -> Intent | None:
     """Return ``"orchestrate"`` for clearly complex work, ``None`` when ambiguous.
 
@@ -56,6 +64,13 @@ def _heuristic_classify(text: str) -> Intent | None:
         return "auto"
 
     lower = " " + text.strip().lower() + " "
+
+    # Ops tasks route straight to the executor, even when they mention
+    # architectural nouns ("push to the azure app SERVICE" is not a design
+    # task). Check the first meaningful word.
+    words = [w for w in text.strip().lower().split() if w not in ("please", "can", "you", "now")]
+    if words and words[0] in _OPS_VERBS:
+        return "auto"
 
     # Orchestrate: big-creation verb AND architectural scope noun.
     has_orch_verb = any(

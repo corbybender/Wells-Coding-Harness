@@ -54,6 +54,7 @@ class RunControl:
         self._lock = threading.Lock()
         self._activity: str = ""
         self._listener: Callable[[UIEvent], None] | None = None
+        self._steers: list[str] = []
 
     # -- cancellation --------------------------------------------------------
 
@@ -61,6 +62,25 @@ class RunControl:
         """Call at the start of every run."""
         self._cancel.clear()
         self.set_activity("")
+        with self._lock:
+            self._steers.clear()
+
+    # -- mid-run steering ------------------------------------------------------
+
+    def add_steer(self, text: str) -> None:
+        """Queue a user instruction to inject into the agent's next round."""
+        with self._lock:
+            self._steers.append(text)
+
+    def drain_steers(self) -> list[str]:
+        with self._lock:
+            out = self._steers[:]
+            self._steers.clear()
+            return out
+
+    def pending_steers(self) -> int:
+        with self._lock:
+            return len(self._steers)
 
     def cancel(self) -> None:
         self._cancel.set()

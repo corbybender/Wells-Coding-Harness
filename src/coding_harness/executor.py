@@ -796,6 +796,16 @@ def run_executor(
                 _ui("warn", f"\n[yellow]⚠ {used:,} of {budget:,} run tokens used "
                            f"({used * 100 // budget}%).[/yellow]")
 
+        # ── Mid-run steering: user /steer notes land in the next round ──────
+        steers = CONTROL.drain_steers()
+        if steers:
+            for s in steers:
+                messages.append(HumanMessage(content=(
+                    f"[USER STEER — read this NOW, mid-task instruction]: {s}\n"
+                    f"Adjust your current approach accordingly before continuing."
+                )))
+                _ui("warn", f"  [bold cyan]⮕ steer delivered:[/bold cyan] {s[:90]}")
+
         # ── Context management pipeline (order matters) ──────────────────────
         messages = _inject_wm(messages, wm)
         messages, mask_saved = _apply_observation_masking(messages, _tool_meta)

@@ -1306,7 +1306,7 @@ class WellsApp(App[None]):
     # a worker run is active. Everything else typed mid-run gets queued.
     _BUSY_SAFE_SLASH = {
         "/status", "/help", "/info", "/context", "/rules", "/export",
-        "/queue", "/btw",
+        "/queue", "/btw", "/steer",
     }
 
     def on_prompt_input_submitted(self, event: PromptInput.Submitted) -> None:
@@ -1396,6 +1396,23 @@ class WellsApp(App[None]):
             # Subcommands (power path) run in a worker thread — server
             # connects can take many seconds (npx downloads, etc.).
             self._run_mcp_command(" ".join(args))
+            return
+
+        if cmd == "/steer":
+            note = " ".join(args)
+            if not note:
+                self.write_log("[dim]Usage: /steer <instruction> — injected into "
+                               "the running agent's next reasoning round.[/dim]")
+                return
+            if not self._busy:
+                self.write_log("[yellow]Nothing is running — just type your "
+                               "message normally.[/yellow]")
+                return
+            CONTROL.add_steer(note)
+            self.write_log(
+                f"[bold cyan]⮕ steer queued:[/bold cyan] {note[:90]} "
+                f"[dim](lands at the agent's next step)[/dim]"
+            )
             return
 
         if cmd == "/queue":

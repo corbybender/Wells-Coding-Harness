@@ -99,11 +99,21 @@ def tester(state: dict) -> dict:
     if passed is True:
         report = f"PASS (deterministic run by harness)\n{gate_output}"
         print("[tester] suite green — skipping LLM interpretation.")
-        return {
+        out: dict = {
             "test_plan": report,
             "test_results": report,
             "tests_passed": True,
         }
+        # Fast path: simple plan + deterministically green suite needs no
+        # reviewer pass — auto-approve and save an entire agent run.
+        if state.get("plan_complexity") == "simple":
+            print("[tester] simple plan + green suite — auto-approving (reviewer skipped).")
+            out["review_complete"] = True
+            out["review_result"] = (
+                "AUTO-APPROVED: simple plan and the full test suite passed "
+                "deterministically (harness-run, exit code 0)."
+            )
+        return out
 
     # ── Layer 2: agentic interpretation ─────────────────────────────────────
     print("[tester] interpreting via executor ...")

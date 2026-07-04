@@ -141,6 +141,12 @@ SLASH_COMMANDS: list[tuple[str, str, str]] = [
         "Messages typed while a task runs are queued and executed in order "
         "when it finishes. Usage: /queue [clear].",
     ),
+    (
+        "/steer",
+        "Redirect the RUNNING agent",
+        "Usage: /steer <instruction>. Injected into the running agent's next "
+        "reasoning round — changes course mid-task without cancelling.",
+    ),
 ]
 
 
@@ -599,9 +605,14 @@ def _run_task(text: str, agent_state: dict, app, callbacks) -> None:
     from coding_harness.control import CONTROL, RunCancelled
 
     try:
+        node_t0 = _time.monotonic()
         for update in app.stream(
             agent_state, config={"callbacks": callbacks}, stream_mode="updates"
         ):
+            node_secs = _time.monotonic() - node_t0
+            node_t0 = _time.monotonic()
+            if node_secs >= 5:
+                console.print(f"[dim]  ({node_secs:.0f}s)[/dim]")
             if CONTROL.cancelled():
                 raise RunCancelled()
             if config.MAX_RUN_TOKENS:

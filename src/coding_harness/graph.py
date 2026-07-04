@@ -57,13 +57,16 @@ def _route_after_plan(state: AgentState) -> str:
 
 
 def _route_after_tests(state: AgentState) -> str:
-    """Conditional edge after the tester: fail-fast on deterministic failures.
+    """Conditional edge after the tester: fail-fast or auto-approve.
 
-    When the harness itself ran the suite and it failed, there is nothing for
-    the reviewer to judge — loop straight back to the coder (via the
-    summarizer) and save the reviewer call. Without ground truth (or once the
-    iteration cap is reached) the reviewer decides as usual.
+    Deterministic failure → loop straight back to the coder (reviewer skipped).
+    Simple plan + deterministic green (tester set review_complete) → straight
+    to the finisher: nothing left for the reviewer to judge. Otherwise the
+    reviewer decides as usual.
     """
+    if state.get("tests_passed") is True and state.get("review_complete"):
+        print("[graph] auto-approved (simple + green) -> finisher (reviewer skipped).")
+        return "finalize"
     if state.get("tests_passed") is False:
         iteration = state.get("iteration", 0)
         cap = state.get("max_iterations", MAX_ITERATIONS)
@@ -110,11 +113,12 @@ def build_graph():
     )
     graph.add_edge("architect", "coder")
     graph.add_edge("coder", "tester")
-    # Deterministic test failures loop straight back (reviewer skipped).
+    # Deterministic test failures loop straight back; simple + green suite
+    # auto-approves straight to the finisher (reviewer skipped both ways).
     graph.add_conditional_edges(
         "tester",
         _route_after_tests,
-        {"review": "reviewer", "loop": "summarizer"},
+        {"review": "reviewer", "loop": "summarizer", "finalize": "finisher"},
     )
     # On INCOMPLETE: condense context, then iterate.
     graph.add_conditional_edges(
