@@ -34,7 +34,7 @@ from typing import Any
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Input, OptionList, RichLog, Static, TextArea
@@ -46,6 +46,7 @@ from coding_harness.tokens import LEDGER
 
 _HISTORY_FILE = Path.home() / ".wells" / "history.json"
 _HISTORY_MAX = 200
+_UI_PREFS_FILE = Path.home() / ".wells" / "ui.json"
 
 # ---------------------------------------------------------------------------
 # CSS
@@ -56,11 +57,26 @@ Screen {
     background: $background;
 }
 
-#output {
+#main {
+    layout: horizontal;
     height: 1fr;
+}
+
+#output {
+    width: 1fr;
+    height: 100%;
     border: none;
     padding: 0 1;
     scrollbar-gutter: stable;
+}
+
+InfoPanel {
+    width: 34;
+    height: 100%;
+    border-left: solid $accent 40%;
+    background: $surface-darken-1;
+    padding: 0 1;
+    overflow-y: auto;
 }
 
 #bottom {
@@ -190,6 +206,163 @@ class StatusBar(Static):
             f"[cyan]{tokens_s}[/cyan]{elapsed_s}  "
             f"{mode}{route_s}{pin_s}{liab_s}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Right-side info panel (F2 toggles; the bottom bar takes over when hidden)
+# ---------------------------------------------------------------------------
+
+class InfoPanel(Static):
+    """Always-visible session dashboard: workspace, model, mode, tokens/$,
+    activity, pinned files, MCP servers, index, git, liabilities."""
+
+    def on_mount(self) -> None:
+        self._slow_cache: dict = {}   # 30s-cached expensive lookups
+        self._slow_at = 0.0
+        self.set_interval(1.0, self._refresh)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        try:
+            self.update(self._build())
+        except Exception:
+            pass
+
+    # -- cached expensive lookups (index stats, git branch) -----------------
+
+    def _slow(self) -> dict:
+        if _time.monotonic() - self._slow_at < 30:
+            return self._slow_cache
+        out: dict = {}
+        try:
+            from coding_harness.index_tools import INDEXER_AVAILABLE, index_status
+            if INDEXER_AVAILABLE:
+                st = index_status(config.WORKSPACE_ROOT)
+                if st.get("exists"):
+                    out["index"] = (
+                        f"{st['total_symbols']:,} syms / {st['total_files']:,} files"
+                    )
+                else:
+                    out["index"] = "[yellow]not built[/yellow]"
+        except Exception:
+            pass
+        try:
+            from coding_harness import gitops
+            ok, branch = gitops._git(
+                config.WORKSPACE_ROOT, "rev-parse", "--abbrev-ref", "HEAD",
+                timeout=5,
+            )
+            if ok and branch.strip():
+                out["branch"] = branch.strip().splitlines()[-1][:24]
+        except Exception:
+            pass
+        self._slow_cache = out
+        self._slow_at = _time.monotonic()
+        return out
+
+    def _build(self) -> str:
+        import coding_harness.cli as _cli
+        from coding_harness import pricing
+
+        L: list[str] = []
+        rule = "[dim]" + "─" * 30 + "[/dim]"
+
+        def row(label: str, value: str) -> None:
+            L.append(f"[dim]{label:<9}[/dim]{value}")
+
+        # -- identity ---------------------------------------------------------
+        L.append("[bold blue]Wells[/bold blue]")
+        L.append(rule)
+        ws = config.WORKSPACE_ROOT
+        if len(ws) > 22:
+            ws = "…" + ws[-21:]
+        row("dir", f"[white]{ws}[/white]")
+        slow = self._slow()
+        if slow.get("branch"):
+            row("branch", f"[white]{slow['branch']}[/white]")
+        try:
+            row("model", f"[green]{config.model_name_for_task('coding')}[/green]")
+        except Exception:
+            pass
+
+        mode_map = {
+            "plan": "[bold yellow]plan[/bold yellow]",
+            "approve": "[bold cyan]approve[/bold cyan]",
+            "dryrun": "[bold magenta]dryrun[/bold magenta]",
+            "auto": "[green]auto[/green]",
+        }
+        row("mode", mode_map.get(_cli.current_mode(), _cli.current_mode()))
+        if _cli._REPL_STATE.get("force_mode") == "task":
+            row("route", "[bold magenta]orchestrate[/bold magenta]")
+
+        # -- usage --------------------------------------------------------------
+        L.append(rule)
+        try:
+            t = LEDGER.totals()
+            used = t["input"] + t["output"]
+            row("tokens", f"[cyan]{used:,}[/cyan]")
+            cost = pricing.fmt(pricing.run_cost())
+            if cost:
+                row("cost", f"[bold]{cost}[/bold]")
+            saved = t["saved_trim"] + t["saved_summary"]
+            if saved:
+                row("saved", f"[green]{saved:,}[/green]")
+            if t["cache_read"]:
+                row("cache", f"[dim]{t['cache_read']:,}[/dim]")
+        except Exception:
+            pass
+
+        # -- activity -------------------------------------------------------------
+        busy_since = _cli._REPL_STATE.get("busy_since")
+        if busy_since is not None:
+            L.append(rule)
+            secs = int(_time.monotonic() - busy_since)
+            elapsed = f"{secs // 60}m {secs % 60:02d}s" if secs >= 60 else f"{secs}s"
+            row("elapsed", f"[yellow]{elapsed}[/yellow]")
+            act = CONTROL.activity()
+            if act:
+                L.append(f"[magenta]{act[:31]}[/magenta]")
+            L.append("[dim]esc: cancel[/dim]")
+
+        # -- context ---------------------------------------------------------------
+        pinned = _cli._REPL_STATE.get("pinned") or []
+        mcp_live: dict = {}
+        try:
+            from coding_harness import mcp_client
+            mcp_live = mcp_client.connected()
+        except Exception:
+            pass
+        if pinned or mcp_live or slow.get("index"):
+            L.append(rule)
+            if pinned:
+                row("pinned", f"[yellow]📌 {len(pinned)}[/yellow]")
+                for p in pinned[:4]:
+                    L.append(f"  [dim]{p[-27:]}[/dim]")
+                if len(pinned) > 4:
+                    L.append(f"  [dim]… +{len(pinned) - 4}[/dim]")
+            if mcp_live:
+                row("mcp", f"[green]{len(mcp_live)} connected[/green]")
+                for name, tools_ in list(mcp_live.items())[:4]:
+                    L.append(f"  [dim]{name} ({len(tools_)})[/dim]")
+            if slow.get("index"):
+                row("index", f"[dim]{slow['index']}[/dim]")
+
+        # -- liabilities -----------------------------------------------------------
+        try:
+            from coding_harness import rules as _rules
+            open_l = _rules.engine_for(config.WORKSPACE_ROOT).open_liabilities()
+            if open_l:
+                L.append(rule)
+                L.append(f"[bold red]⚠ {len(open_l)} OPEN LIABILITY[/bold red]")
+                for l in open_l[:3]:
+                    L.append(f"  [red]{l['rule_id'][:28]}[/red]")
+                L.append("[dim]/rules to resolve[/dim]")
+        except Exception:
+            pass
+
+        L.append(rule)
+        L.append("[dim]F2: hide panel[/dim]")
+        return "\n".join(L)
 
 
 # ---------------------------------------------------------------------------
@@ -821,6 +994,7 @@ class WellsApp(App[None]):
         Binding("ctrl+c", "quit", "Quit", priority=True),
         Binding("escape", "cancel_task", "Cancel task"),
         Binding("ctrl+l", "clear_log", "Clear output"),
+        Binding("f2", "toggle_panel", "Info panel", priority=True),
         # Scroll bindings — priority=True so they fire even when Input has focus.
         # mouse=False hands mouse-wheel events to the terminal (for copy-paste),
         # so keyboard is the only scroll path inside the TUI.
@@ -851,12 +1025,14 @@ class WellsApp(App[None]):
     # ------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        yield RichLog(
-            id="output",
-            markup=True,
-            highlight=True,
-            wrap=True,
-        )
+        with Horizontal(id="main"):
+            yield RichLog(
+                id="output",
+                markup=True,
+                highlight=True,
+                wrap=True,
+            )
+            yield InfoPanel(id="info-panel")
         yield OptionList(id="command-list")
         with Vertical(id="bottom"):
             yield PromptInput(
@@ -878,6 +1054,9 @@ class WellsApp(App[None]):
         self._log: RichLog = self.query_one("#output", RichLog)
         self._input: PromptInput = self.query_one("#input", PromptInput)
         self._cmdlist: OptionList = self.query_one("#command-list", OptionList)
+        self._panel: InfoPanel = self.query_one("#info-panel", InfoPanel)
+        self._statusbar: StatusBar = self.query_one(StatusBar)
+        self._apply_panel_visibility(self._load_panel_pref())
 
         # Initialize shared REPL state.
         _REPL_STATE["memory"] = chat.ConversationMemory()
@@ -973,7 +1152,7 @@ class WellsApp(App[None]):
             "Ask anything — questions, edits, tasks. "
             "Use [bold]/orchestrate[/bold] for complex multi-component work. "
             "Type [bold]/[/bold] for all commands. "
-            "[dim]Shift+Enter: newline · ↑/↓: history · Esc: cancel run[/dim]\n"
+            "[dim]Shift+Enter: newline · ↑/↓: history · Esc: cancel run · F2: info panel[/dim]\n"
         )
 
     def _ensure_repo_index(self) -> None:
@@ -1529,6 +1708,35 @@ class WellsApp(App[None]):
 
     def action_clear_log(self) -> None:
         self._log.clear()
+
+    # -- info panel ----------------------------------------------------------
+
+    def _load_panel_pref(self) -> bool:
+        try:
+            return bool(json.loads(_UI_PREFS_FILE.read_text(encoding="utf-8"))
+                        .get("info_panel", True))
+        except Exception:
+            return True
+
+    def _save_panel_pref(self, visible: bool) -> None:
+        try:
+            _UI_PREFS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _UI_PREFS_FILE.write_text(
+                json.dumps({"info_panel": visible}), encoding="utf-8"
+            )
+        except Exception:
+            pass
+
+    def _apply_panel_visibility(self, visible: bool) -> None:
+        # The panel and the compact bottom bar carry the same info — show
+        # exactly one so the data is always somewhere on screen.
+        self._panel.display = visible
+        self._statusbar.display = not visible
+
+    def action_toggle_panel(self) -> None:
+        visible = not self._panel.display
+        self._apply_panel_visibility(visible)
+        self._save_panel_pref(visible)
 
     def action_scroll_up(self) -> None:
         self._log.scroll_page_up(animate=False)
