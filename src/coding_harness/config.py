@@ -92,7 +92,10 @@ CHEAP_PROFILE: str = os.getenv("MODEL_PROFILE_CHEAP", "").strip()
 # Shown in logs/reports; falls back to the active profile's resolved model.
 ACTIVE_MODEL_LABEL: str = os.getenv("ACTIVE_MODEL_LABEL", "").strip()
 
-MAX_ITERATIONS: int = int(os.getenv("MAX_ITERATIONS", "3"))
+# Limit knobs: 0 means NO LIMIT everywhere. The practical backstops when
+# running unlimited are MAX_RUN_TOKENS, Escape (cooperative cancel), and the
+# executor's stuck-loop detector.
+MAX_ITERATIONS: int = int(os.getenv("MAX_ITERATIONS", "0"))
 
 # Retry tuning for transient network / rate-limit blips.
 LLM_TIMEOUT: float = float(os.getenv("LLM_TIMEOUT", "180"))
@@ -132,8 +135,15 @@ WORKSPACE_ROOT: str = os.getenv("WORKSPACE_ROOT", os.getcwd()).strip() or os.get
 #   dryrun  - never execute, just describe what would happen
 HARNESS_SAFETY: str = os.getenv("HARNESS_SAFETY", "auto").strip().lower() or "auto"
 
-# Max tool-call steps in a single executor run before the loop is forced to stop.
-MAX_TOOL_STEPS: int = int(os.getenv("MAX_TOOL_STEPS", "60"))
+# Max tool-call steps in a single executor run (0 = no limit).
+MAX_TOOL_STEPS: int = int(os.getenv("MAX_TOOL_STEPS", "0"))
+
+# Per-agent step caps (0 = no limit). Applied to the agentic planner, the
+# tester/reviewer verification loops, and spawned subagents.
+PLANNER_MAX_STEPS: int = int(os.getenv("PLANNER_MAX_STEPS", "0"))
+TESTER_MAX_STEPS: int = int(os.getenv("TESTER_MAX_STEPS", "0"))
+REVIEWER_MAX_STEPS: int = int(os.getenv("REVIEWER_MAX_STEPS", "0"))
+SUBAGENT_MAX_STEPS: int = int(os.getenv("SUBAGENT_MAX_STEPS", "0"))
 
 # Rules engine: deterministic enforcement of .wells/rules.yaml at the tool
 # boundary (block/confirm/warn/liability). RULES_AUTODISCHARGE runs a bounded

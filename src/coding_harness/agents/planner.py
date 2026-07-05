@@ -79,12 +79,13 @@ def planner(state: dict) -> dict:
 
     ctx = ToolContext.from_state(state)
 
+    from coding_harness import config as _config
     result = run_executor(
         task=task,
         ctx=ctx,
         toolset=_tools.READ_TOOLS,   # find_symbol, grep, read, list, glob — no writes, no shell
         system_prefix=_PLANNER_PREFIX,
-        max_steps=25,                # enough to explore; not enough to drift
+        max_steps=_config.PLANNER_MAX_STEPS,  # 0 = no limit
         step_label="planner",
     )
 

@@ -292,3 +292,10 @@ def test_steer_injected_into_next_round(tmp_path: Path):
     # The steer was present in the messages of the first (and later) calls.
     assert seen_steer_at_call and seen_steer_at_call[0] is True
     assert CONTROL.pending_steers() == 0
+
+
+def test_iteration_cap_zero_never_finalizes_by_cap():
+    state = {"review_complete": False, "iteration": 99, "max_iterations": 0}
+    assert _route_after_review(state) == "loop"
+    state_tests = {"tests_passed": False, "iteration": 99, "max_iterations": 0}
+    assert _route_after_tests(state_tests) == "loop"

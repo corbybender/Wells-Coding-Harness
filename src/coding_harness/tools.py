@@ -629,7 +629,7 @@ def _autodetect_test_command(ctx: ToolContext) -> str:
 
 
 def _spawn_subagent(
-    ctx: ToolContext, task: str, role: str = "research", max_steps: int = 8
+    ctx: ToolContext, task: str, role: str = "research", max_steps: int | None = None
 ) -> ToolResult:
     """Spawn a focused subagent (research/fix) and return its report.
 
@@ -658,7 +658,7 @@ def _spawn_subagent(
 
 
 def _parallel_research(
-    ctx: ToolContext, questions: list | None = None, max_steps: int = 8
+    ctx: ToolContext, questions: list | None = None, max_steps: int | None = None
 ) -> ToolResult:
     """Run 2–4 read-only research subagents concurrently and merge their reports.
 
@@ -785,7 +785,7 @@ READ_TOOLS: list[ToolDef] = [
                     "items": {"type": "string"},
                     "description": "1-4 focused, independent research questions",
                 },
-                "max_steps": {"type": "integer", "default": 8},
+                "max_steps": {"type": "integer", "default": 0},
             },
             "required": ["questions"],
         },
@@ -870,7 +870,7 @@ EXEC_TOOLS: list[ToolDef] = [
                     "enum": ["research", "fix"],
                     "default": "research",
                 },
-                "max_steps": {"type": "integer", "default": 8},
+                "max_steps": {"type": "integer", "default": 0},
             },
             "required": ["task"],
         },

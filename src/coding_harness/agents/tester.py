@@ -116,6 +116,7 @@ def tester(state: dict) -> dict:
         return out
 
     # ── Layer 2: agentic interpretation ─────────────────────────────────────
+    from coding_harness import config as _config
     print("[tester] interpreting via executor ...")
     # Read+exec only — the tester must not edit source.
     toolset = registry(include_mutating=False) + [
@@ -137,7 +138,7 @@ def tester(state: dict) -> dict:
         task=task,
         ctx=ctx,
         toolset=toolset,
-        max_steps=8,
+        max_steps=_config.TESTER_MAX_STEPS,  # 0 = no limit
         step_label="tester",
         temperature=0.0,
         # Verification is judgment-light — route to the cheap profile when set.

@@ -328,6 +328,17 @@ class InfoPanel(Static):
             if act:
                 L.append(f"[magenta]{act[:31]}[/magenta]")
             L.append("[dim]esc: cancel · /btw: side chat[/dim]")
+
+        # -- per-stage step progress (cap 0 = No Limit) ----------------------------
+        prog = CONTROL.progress()
+        if prog:
+            L.append(rule)
+            L.append("[bold]progress[/bold]")
+            for label, cur, cap in prog[-8:]:
+                cap_disp = "[green]No Limit[/green]" if cap == 0 else str(cap)
+                current = label == prog[-1][0] and busy_since is not None
+                marker = "[yellow]▶[/yellow] " if current else "  "
+                L.append(f"{marker}[dim]{label[:13]:<13}[/dim]{cur} [dim]/[/dim] {cap_disp}")
         try:
             queued = len(self.app._queue)  # type: ignore[attr-defined]
         except Exception:

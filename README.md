@@ -402,8 +402,9 @@ wells-index/           # Rust structural indexer (tree-sitter + SQLite)
 | `WORKSPACE_ROOT` | `cwd` | Directory the agent is confined to |
 | `HARNESS_SAFETY` | `auto` | `auto` / `approve` / `dryrun` (or use `/mode`) |
 | `PLAN_MODE` | `0` | When on, mutating tools simulate |
-| `MAX_ITERATIONS` | `3` | Max coder↔reviewer loops |
-| `MAX_TOOL_STEPS` | `60` | Max tool-call rounds per executor run |
+| `MAX_ITERATIONS` | `0` (no limit) | Max coder↔reviewer loops |
+| `MAX_TOOL_STEPS` | `0` (no limit) | Max tool-call rounds per executor run |
+| `PLANNER_MAX_STEPS` / `TESTER_MAX_STEPS` / `REVIEWER_MAX_STEPS` / `SUBAGENT_MAX_STEPS` | `0` (no limit) | Per-agent step caps |
 | `MAX_RUN_TOKENS` | `0` (off) | Hard token cap per run; warns at 80% |
 | `SELF_CHECK` | `1` | Post-edit lint/syntax self-heal |
 | `CHEAP_VERIFY` | `1` | Route tester/reviewer to the cheap profile |

@@ -83,7 +83,7 @@ def reviewer(state: dict) -> dict:
         task=task,
         ctx=ctx,
         toolset=toolset,
-        max_steps=10,
+        max_steps=_config.REVIEWER_MAX_STEPS,  # 0 = no limit
         step_label="reviewer",
         temperature=0.0,
         # Verification is judgment-light — route to the cheap profile when set.

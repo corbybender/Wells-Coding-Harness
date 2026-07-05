@@ -55,6 +55,8 @@ class RunControl:
         self._activity: str = ""
         self._listener: Callable[[UIEvent], None] | None = None
         self._steers: list[str] = []
+        # Ordered per-stage progress: label -> (current_step, cap). cap 0 = no limit.
+        self._progress: dict[str, tuple[int, int]] = {}
 
     # -- cancellation --------------------------------------------------------
 
@@ -64,6 +66,18 @@ class RunControl:
         self.set_activity("")
         with self._lock:
             self._steers.clear()
+            self._progress.clear()
+
+    # -- per-stage progress (drives the info panel) ---------------------------
+
+    def set_progress(self, label: str, current: int, cap: int) -> None:
+        with self._lock:
+            self._progress[label] = (current, cap)
+
+    def progress(self) -> list[tuple[str, int, int]]:
+        """Stages in start order: (label, current_step, cap). cap 0 = no limit."""
+        with self._lock:
+            return [(k, v[0], v[1]) for k, v in self._progress.items()]
 
     # -- mid-run steering ------------------------------------------------------
 

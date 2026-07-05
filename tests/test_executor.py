@@ -278,3 +278,58 @@ def test_loop_stops_on_token_budget(ctx: tools.ToolContext):
     # First round runs (usage 0 < budget), second round trips the cap.
     assert result.stopped_reason == "budget"
     assert "budget" in result.summary
+
+
+def test_cap_zero_means_no_limit(ctx: tools.ToolContext):
+    """max_steps=0 runs until the model finishes, past any old default."""
+    from coding_harness.control import CONTROL
+
+    LEDGER.reset()
+    CONTROL.reset()
+    repeat = AIMessage(
+        content='<tool_call>{"name": "list_dir", "args": {}}</tool_call>'
+    )
+    script = [repeat] * 70 + [AIMessage(content="done at last")]
+    with (
+        patch.object(config, "_invoke_with_retry", side_effect=_scripted(script)),
+        patch.object(executor, "_try_bind_tools", return_value=None),
+    ):
+        result = executor.run_executor(task="x", ctx=ctx, max_steps=0, step_label="t")
+    assert result.stopped_reason == "done"
+    assert result.steps_taken == 70
+
+
+def test_explicit_cap_still_enforced(ctx: tools.ToolContext):
+    from coding_harness.control import CONTROL
+
+    LEDGER.reset()
+    CONTROL.reset()
+    repeat = AIMessage(
+        content='<tool_call>{"name": "list_dir", "args": {}}</tool_call>'
+    )
+    with (
+        patch.object(config, "_invoke_with_retry", side_effect=_scripted([repeat] * 20)),
+        patch.object(executor, "_try_bind_tools", return_value=None),
+    ):
+        result = executor.run_executor(task="x", ctx=ctx, max_steps=3, step_label="t")
+    assert result.stopped_reason == "max_steps"
+    assert result.steps_taken == 3
+
+
+def test_progress_published(ctx: tools.ToolContext):
+    from coding_harness.control import CONTROL
+
+    LEDGER.reset()
+    CONTROL.reset()
+    script = [
+        AIMessage(content='<tool_call>{"name": "list_dir", "args": {}}</tool_call>'),
+        AIMessage(content="done"),
+    ]
+    with (
+        patch.object(config, "_invoke_with_retry", side_effect=_scripted(script)),
+        patch.object(executor, "_try_bind_tools", return_value=None),
+    ):
+        executor.run_executor(task="x", ctx=ctx, max_steps=0, step_label="mystage")
+    prog = dict((l, (c, cap)) for l, c, cap in CONTROL.progress())
+    assert "mystage" in prog
+    assert prog["mystage"][1] == 0  # cap recorded as no-limit

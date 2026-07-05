@@ -49,7 +49,7 @@ class SubagentSpec:
     role: str  # research | fix | review (informational)
     task: str  # focused natural-language task
     toolset: str = "readonly"  # readonly | exec | full
-    max_steps: int = 8
+    max_steps: int | None = None  # None -> config.SUBAGENT_MAX_STEPS (0 = no limit)
     temperature: float = 0.1
 
 
@@ -113,12 +113,17 @@ def run_subagent(
     """
     toolset = _resolve_toolset(spec.toolset)
     sub_ctx = replace(ctx, subagent=True)
+    if spec.max_steps is None:
+        from coding_harness import config as _config
+        cap = _config.SUBAGENT_MAX_STEPS  # 0 = no limit
+    else:
+        cap = spec.max_steps
     try:
         result: ExecutorResult = executor.run_executor(
             task=spec.task,
             ctx=sub_ctx,
             toolset=toolset,
-            max_steps=spec.max_steps,
+            max_steps=cap,
             profile=profile,
             temperature=spec.temperature,
             step_label=f"subagent-{spec.name}",
@@ -181,7 +186,7 @@ def dispatch_subagents(
 # ---------------------------------------------------------------------------
 
 
-def research_subagent(name: str, question: str, *, max_steps: int = 8) -> SubagentSpec:
+def research_subagent(name: str, question: str, *, max_steps: int | None = None) -> SubagentSpec:
     """A read-only investigator. Cannot mutate the workspace."""
     task = (
         f"Research task (read-only). Investigate the codebase to answer this question precisely:\n"
@@ -195,7 +200,7 @@ def research_subagent(name: str, question: str, *, max_steps: int = 8) -> Subage
     )
 
 
-def fix_subagent(name: str, change: str, *, max_steps: int = 10) -> SubagentSpec:
+def fix_subagent(name: str, change: str, *, max_steps: int | None = None) -> SubagentSpec:
     """A scoped editor. Makes a single, well-defined change and verifies it."""
     task = (
         f"Scoped edit task. Make exactly this change in the workspace, then verify it:\n"

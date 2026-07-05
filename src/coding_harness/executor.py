@@ -703,6 +703,8 @@ def run_executor(
         ``tools.registry(include_mutating=False)`` for read-only subagents.
     max_steps : int, optional
         Cap on tool-call rounds. Defaults to ``config.MAX_TOOL_STEPS``.
+        **0 means no limit** (backstops: MAX_RUN_TOKENS, cancellation, and
+        the stuck-loop detector).
     profile : str, optional
         Provider profile to use. Defaults to the active profile.
     quiet : bool, optional
@@ -774,8 +776,10 @@ def run_executor(
 
     budget = config.MAX_RUN_TOKENS
     budget_warned = False
+    cap_s = str(cap) if cap else "∞"
 
-    while steps < cap:
+    while cap == 0 or steps < cap:
+        CONTROL.set_progress(step_label, steps, cap)
         # ── Cooperative cancellation (set by the TUI on Escape) ─────────────
         if CONTROL.cancelled():
             return _stopped("cancelled", "(cancelled by user)")
@@ -816,7 +820,7 @@ def run_executor(
         # ─────────────────────────────────────────────────────────────────────
 
         rounds += 1
-        _act(f"thinking · round {rounds} · step {steps}/{cap}")
+        _act(f"thinking · round {rounds} · step {steps}/{cap_s}")
         streamed_this_round = False
         try:
             if stream:
@@ -922,7 +926,8 @@ def run_executor(
                             obs_text, tool_call_id=tcid, name=name, ai_message=resp))
                         continue
 
-            _act(f"{name} · step {steps}/{cap}")
+            _act(f"{name} · step {steps}/{cap_s}")
+            CONTROL.set_progress(step_label, steps, cap)
             result = tools.dispatch(name, args, ctx)
             obs_text = result.to_model_text()
             if rules_engine is not None and decision is not None:
@@ -1040,7 +1045,7 @@ def run_executor(
                 _tool_message(obs_text, tool_call_id=tcid, name=name, ai_message=resp)
             )
 
-        if steps >= cap:
+        if cap and steps >= cap:
             # One final round: apply full context pipeline then ask for summary.
             try:
                 messages = _inject_wm(messages, wm)

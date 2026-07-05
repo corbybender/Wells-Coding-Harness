@@ -70,7 +70,7 @@ def _route_after_tests(state: AgentState) -> str:
     if state.get("tests_passed") is False:
         iteration = state.get("iteration", 0)
         cap = state.get("max_iterations", MAX_ITERATIONS)
-        if iteration < cap:
+        if cap == 0 or iteration < cap:  # cap 0 = no limit
             print(f"[graph] tests failing (iteration {iteration}) -> summarizer -> coder (reviewer skipped).")
             return "loop"
     return "review"
@@ -83,7 +83,7 @@ def _route_after_review(state: AgentState) -> str:
 
     iteration = state.get("iteration", 0)
     cap = state.get("max_iterations", MAX_ITERATIONS)
-    if iteration >= cap:
+    if cap and iteration >= cap:  # cap 0 = no limit
         print(f"[graph] reached max iterations ({cap}); finalizing.")
         return "finalize"
 

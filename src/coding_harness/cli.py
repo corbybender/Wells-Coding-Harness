@@ -629,6 +629,11 @@ def _run_task(text: str, agent_state: dict, app, callbacks) -> None:
                 console.print(f"\n{label}")
                 for k, v in node_state.items():
                     agent_state[k] = v
+                CONTROL.set_progress(
+                    "iteration",
+                    agent_state.get("iteration", 0),
+                    agent_state.get("max_iterations", config.MAX_ITERATIONS),
+                )
 
             # Checkpoint after every node: a crash/kill mid-run loses at most
             # one node's work, and /resume can continue from the last state.
