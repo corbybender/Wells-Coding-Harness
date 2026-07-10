@@ -1,6 +1,6 @@
 # wells-index
 
-Fast structural repository indexer for [wells-wells](https://github.com/corbybender/Wells). Uses Tree-sitter for language parsing, SQLite for storage, and BLAKE3 for incremental hashing.
+Fast structural repository indexer for [Wells](https://github.com/corbybender/Wells). Uses Tree-sitter for language parsing, SQLite for storage, and BLAKE3 for incremental hashing.
 
 ## Install
 

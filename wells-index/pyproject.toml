@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "wells-index"
 version = "0.1.1"
-description = "Fast structural repository indexer for wells-wells"
+description = "Fast structural repository indexer for Wells"
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{name = "Wells Contributors", email = "dev@example.com"}]
