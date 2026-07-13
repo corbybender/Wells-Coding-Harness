@@ -333,3 +333,51 @@ def test_progress_published(ctx: tools.ToolContext):
     prog = dict((l, (c, cap)) for l, c, cap in CONTROL.progress())
     assert "mystage" in prog
     assert prog["mystage"][1] == 0  # cap recorded as no-limit
+
+
+# ---------------------------------------------------------------------------
+# LLM-call cancellation (a blocking llm.invoke() had zero cancellation
+# checks: Escape/`/stop` had no effect until the call returned, up to
+# LLM_TIMEOUT x LLM_MAX_RETRIES seconds)
+# ---------------------------------------------------------------------------
+
+
+def test_invoke_cancelable_returns_none_when_cancelled_first():
+    import threading
+    import time
+
+    from wells.control import CONTROL
+
+    CONTROL.reset()
+
+    def slow_invoke(llm, messages):
+        time.sleep(5)
+        return AIMessage(content="too late")
+
+    holder: dict = {}
+
+    def run():
+        t0 = time.monotonic()
+        with patch.object(config, "_invoke_with_retry", side_effect=slow_invoke):
+            holder["resp"] = executor._invoke_cancelable(object(), [])
+        holder["elapsed"] = time.monotonic() - t0
+
+    th = threading.Thread(target=run)
+    th.start()
+    time.sleep(0.3)
+    CONTROL.cancel()
+    th.join(timeout=5)
+    CONTROL.reset()
+    assert not th.is_alive()
+    assert holder["resp"] is None
+    assert holder["elapsed"] < 2.0, f"took {holder['elapsed']:.2f}s to return after cancel"
+
+
+def test_invoke_cancelable_returns_result_when_not_cancelled():
+    from wells.control import CONTROL
+
+    CONTROL.reset()
+    msg = AIMessage(content="hi")
+    with patch.object(config, "_invoke_with_retry", return_value=msg):
+        resp = executor._invoke_cancelable(object(), [])
+    assert resp is msg

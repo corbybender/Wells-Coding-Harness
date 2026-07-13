@@ -18,14 +18,44 @@ the Textual event loop, worker threads, and library code.
 
 from __future__ import annotations
 
+import os
+import platform
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+_ON_WINDOWS = platform.system() == "Windows"
+
 
 class RunCancelled(Exception):
     """Raised inside a run when the user cancelled it."""
+
+
+def kill_process_tree(proc: subprocess.Popen) -> None:
+    """Best-effort hard-kill of *proc* and everything it spawned.
+
+    ``Popen.kill()`` only signals the direct child (pwsh.exe / sh) — whatever
+    it launched (npm, a test runner, a build) keeps running as an orphan.
+    Used by the shell-command tool's cancellation poll and by ``/stop``'s
+    hard-kill path.
+    """
+    try:
+        if _ON_WINDOWS:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True, timeout=10,
+            )
+        else:
+            import signal
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:
+        pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +91,8 @@ class RunControl:
         self._progress: dict[str, tuple[int, int]] = {}
         # Ordered pipeline stages: name -> {"status": run|done|fail, "t0", "secs"}.
         self._stages: dict[str, dict] = {}
+        # Live subprocesses spawned by tool calls, for /stop's immediate hard-kill.
+        self._procs: set[subprocess.Popen] = set()
 
     # -- cancellation --------------------------------------------------------
 
@@ -137,6 +169,35 @@ class RunControl:
         """Raise :class:`RunCancelled` if a cancel was requested."""
         if self._cancel.is_set():
             raise RunCancelled()
+
+    # -- hard kill (/stop) ----------------------------------------------------
+    # Escape/cancel() is cooperative — it asks running code to stop at its next
+    # checkpoint (a polling loop). /stop does not ask: it kills every tracked
+    # subprocess right now, on top of setting the cancel flag. Python cannot
+    # force-kill a thread, so a blocked-on-network-I/O worker may still be
+    # finishing a single call in the background — the run generation counter
+    # in the TUI is what makes that outcome get discarded instead of reviving
+    # the UI.
+
+    def track_proc(self, proc: subprocess.Popen) -> None:
+        with self._lock:
+            self._procs.add(proc)
+
+    def untrack_proc(self, proc: subprocess.Popen) -> None:
+        with self._lock:
+            self._procs.discard(proc)
+
+    def kill_tracked_procs(self) -> int:
+        """Hard-kill every live tracked subprocess (and its tree). Returns count."""
+        with self._lock:
+            procs = list(self._procs)
+        n = 0
+        for p in procs:
+            if p.poll() is None:
+                kill_process_tree(p)
+                n += 1
+            self.untrack_proc(p)
+        return n
 
     # -- live activity -------------------------------------------------------
 

@@ -564,4 +564,11 @@ def _looks_like_override(arg: str) -> bool:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        # Defense in depth: run_tui() already catches this around the TUI's
+        # own asyncio.run(), but the one-shot goal path (_run_goal) and any
+        # exception during asyncio's own shutdown can still surface here.
+        print("\n[wells] interrupted.")
+        sys.exit(130)

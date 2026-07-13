@@ -291,6 +291,7 @@ def _invoke_with_retry(llm, messages):
     backoff loop so progress is logged and transient TLS/429 errors are survived.
     Raises the last error if every retry fails.
     """
+    from wells.control import CONTROL
     from wells.logger import log_error, log_path
     last_err: Exception | None = None
     for attempt in range(1, LLM_MAX_RETRIES + 1):
@@ -306,7 +307,15 @@ def _invoke_with_retry(llm, messages):
                 f"[llm] transient {type(err).__name__} on attempt {attempt}/"
                 f"{LLM_MAX_RETRIES}; retrying in {backoff:.1f}s ..."
             )
-            time.sleep(backoff)
+            # Sleep in small slices so a cancel lands within ~250ms instead
+            # of blocking for the full backoff (up to 30s per attempt).
+            waited = 0.0
+            while waited < backoff and not CONTROL.cancelled():
+                step = min(0.25, backoff - waited)
+                time.sleep(step)
+                waited += step
+            if CONTROL.cancelled():
+                break
     assert last_err is not None
     print(f"[llm] all retries failed. Full error logged to: {log_path()}")
     raise last_err

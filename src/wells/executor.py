@@ -858,7 +858,7 @@ def run_executor(
             if stream:
                 resp, streamed_this_round = _stream_invoke(llm, messages)
             else:
-                resp = config._invoke_with_retry(llm, messages)
+                resp = _invoke_cancelable(llm, messages)
         except Exception as e:
             return ExecutorResult(
                 summary=f"[executor error: {type(e).__name__}: {e}]",
@@ -867,6 +867,11 @@ def run_executor(
                 stopped_reason="error",
                 messages=messages,
             )
+        if resp is None:
+            # Cancelled while waiting on the model — there's no way to abort
+            # an in-flight HTTP request, so the call keeps running on its own
+            # thread and its eventual result is simply discarded.
+            return _stopped("cancelled", "(cancelled by user)")
         _account_usage(step=step_label, model=model_name, messages=messages, resp=resp,
                        saved_by_trim=saved)
         messages.append(resp)
@@ -961,6 +966,12 @@ def run_executor(
             _act(f"{name} · step {steps}/{cap_s}")
             CONTROL.set_progress(step_label, steps, cap)
             result = tools.dispatch(name, args, ctx)
+            # dispatch() can block for a while (a shell command, a subagent);
+            # check again right after it returns instead of waiting for the
+            # top of the next round — a cancel that landed mid-command should
+            # stop the run now, not after one more LLM round-trip.
+            if CONTROL.cancelled():
+                return _stopped("cancelled", "(cancelled by user)")
             obs_text = result.to_model_text()
             if rules_engine is not None and decision is not None:
                 # Liability transitions apply only after the command actually
@@ -1119,7 +1130,35 @@ def run_executor(
 # ---------------------------------------------------------------------------
 
 
-def _stream_invoke(llm, messages) -> tuple[BaseMessage, bool]:
+def _invoke_cancelable(llm, messages) -> BaseMessage | None:
+    """Invoke ``llm`` on a helper thread and poll CONTROL every 250ms.
+
+    A plain blocking ``llm.invoke()`` has no cancellation checks at all — it
+    just sits there for up to ``LLM_TIMEOUT × LLM_MAX_RETRIES`` seconds
+    (minutes) with Escape/`/stop` having zero effect. There is no way to
+    abort an in-flight HTTP request from Python, so this doesn't kill the
+    underlying call — it stops the executor from waiting on it. The call
+    keeps running on its own thread and its result is discarded.
+
+    Returns ``None`` when cancelled before a response arrived.
+    """
+    import concurrent.futures
+
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    fut = ex.submit(config._invoke_with_retry, llm, messages)
+    try:
+        while True:
+            if CONTROL.cancelled():
+                return None
+            try:
+                return fut.result(timeout=0.25)
+            except concurrent.futures.TimeoutError:
+                continue
+    finally:
+        ex.shutdown(wait=False)
+
+
+def _stream_invoke(llm, messages) -> tuple[BaseMessage | None, bool]:
     """Invoke the model with live token streaming to stdout.
 
     Returns ``(response, streamed_text)``. Chunks are aggregated with ``+`` so
@@ -1157,11 +1196,15 @@ def _stream_invoke(llm, messages) -> tuple[BaseMessage, bool]:
             _sys.stdout.write("\n")
             _sys.stdout.flush()
         if full is None:
-            return config._invoke_with_retry(llm, messages), False
+            if CONTROL.cancelled():
+                return None, False
+            return _invoke_cancelable(llm, messages), False
         return full, emitted
     except Exception:
+        if CONTROL.cancelled():
+            return None, False
         # Provider/transport can't stream — degrade to the retry path.
-        return config._invoke_with_retry(llm, messages), False
+        return _invoke_cancelable(llm, messages), False
 
 
 def _try_bind_tools(llm, toolset: list[tools.ToolDef]):

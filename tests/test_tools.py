@@ -289,3 +289,84 @@ def test_config_falls_back_when_workspace_root_invalid(monkeypatch):
     finally:
         monkeypatch.delenv("WORKSPACE_ROOT")
         importlib.reload(config_mod)
+
+
+# ---------------------------------------------------------------------------
+# Cancellation (a blocking run_command used to be un-interruptible: Escape
+# and /stop had zero effect until the command finished or timed out)
+# ---------------------------------------------------------------------------
+
+
+def test_run_shell_cancel_kills_long_command_quickly(workspace: Path):
+    import threading
+    import time
+
+    from wells.control import CONTROL
+
+    CONTROL.reset()
+    cmd = "Start-Sleep -Seconds 20" if tools._ON_WINDOWS else "sleep 20"
+    holder: dict = {}
+
+    def run():
+        t0 = time.monotonic()
+        try:
+            holder["proc"] = tools._run_shell(cmd, cwd=str(workspace), timeout=60)
+        except tools.ShellCancelled:
+            holder["cancelled"] = True
+        holder["elapsed"] = time.monotonic() - t0
+
+    th = threading.Thread(target=run)
+    th.start()
+    try:
+        for _ in range(40):  # up to ~4s for the command to actually start
+            if CONTROL._procs:
+                break
+            time.sleep(0.1)
+        assert CONTROL._procs, "shell command should be tracked while running"
+        CONTROL.cancel()
+        th.join(timeout=10)
+    finally:
+        CONTROL.reset()
+    assert not th.is_alive(), "cancel did not stop the blocking shell call"
+    assert holder.get("cancelled") is True
+    assert holder["elapsed"] < 5.0, f"cancellation took {holder['elapsed']:.1f}s"
+
+
+def test_run_command_reports_cancelled(ctx: tools.ToolContext):
+    from unittest.mock import patch
+
+    with patch.object(tools, "_run_shell", side_effect=tools.ShellCancelled()):
+        r = tools._run_command(ctx, "echo hi")
+    assert not r.ok
+    assert "cancelled" in (r.error or "").lower()
+
+
+def test_kill_tracked_procs_hard_kills(workspace: Path):
+    import threading
+    import time
+
+    from wells.control import CONTROL
+
+    CONTROL.reset()
+    cmd = "Start-Sleep -Seconds 20" if tools._ON_WINDOWS else "sleep 20"
+    holder: dict = {}
+
+    def run():
+        try:
+            tools._run_shell(cmd, cwd=str(workspace), timeout=60)
+        except tools.ShellCancelled:
+            holder["cancelled"] = True
+
+    th = threading.Thread(target=run)
+    th.start()
+    try:
+        for _ in range(40):
+            if CONTROL._procs:
+                break
+            time.sleep(0.1)
+        n = CONTROL.kill_tracked_procs()
+        th.join(timeout=10)
+    finally:
+        CONTROL.reset()
+    assert n >= 1
+    assert not th.is_alive()

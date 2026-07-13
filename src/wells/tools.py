@@ -128,6 +128,10 @@ _PWSH: str | None = shutil.which("pwsh") or shutil.which("powershell")
 _ON_WINDOWS: bool = platform.system() == "Windows"
 
 
+class ShellCancelled(Exception):
+    """Raised internally when a running shell command is cancelled (Escape/`/stop`)."""
+
+
 def _run_shell(command: str, cwd: str, timeout: float) -> subprocess.CompletedProcess:
     """Run *command* in the appropriate shell for the current OS.
 
@@ -137,6 +141,14 @@ def _run_shell(command: str, cwd: str, timeout: float) -> subprocess.CompletedPr
     misinterprets most PS syntax.
 
     On Linux/macOS: use shell=True (bash/sh) as before.
+
+    Runs via Popen and polls every 250ms instead of blocking inside
+    ``subprocess.run(timeout=...)`` for up to *timeout* seconds — a plain
+    ``subprocess.run`` has zero cancellation checks, so a long-running shell
+    command used to be the one thing Escape could never interrupt (the app
+    just sat there until the command finished or its 120s default timeout
+    elapsed). The child is registered with CONTROL so `/stop` can kill it
+    (and its process tree) immediately from outside this loop too.
     """
     # subprocess raises an opaque WinError 267 / FileNotFoundError when cwd
     # doesn't exist — return an actionable failure the model can relay instead.
@@ -149,25 +161,43 @@ def _run_shell(command: str, cwd: str, timeout: float) -> subprocess.CompletedPr
                 "/working-dir <path> (or correct WORKSPACE_ROOT in .env)."
             ),
         )
+    from wells.control import CONTROL, kill_process_tree
+
     env = _subprocess_env()
     if _ON_WINDOWS and _PWSH:
-        return subprocess.run(
-            [_PWSH, "-NoProfile", "-NonInteractive", "-Command", command],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-        )
-    return subprocess.run(
-        command,
-        shell=True,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=env,
+        args: Any = [_PWSH, "-NoProfile", "-NonInteractive", "-Command", command]
+        shell = False
+        popen_kwargs: dict = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    else:
+        args = command
+        shell = True
+        popen_kwargs = {} if _ON_WINDOWS else {"start_new_session": True}
+
+    proc = subprocess.Popen(
+        args, shell=shell, cwd=cwd, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        **popen_kwargs,
     )
+    CONTROL.track_proc(proc)
+    t0 = _time.monotonic()
+    try:
+        while True:
+            try:
+                out, err = proc.communicate(timeout=0.25)
+                return subprocess.CompletedProcess(command, proc.returncode, out, err)
+            except subprocess.TimeoutExpired:
+                pass  # documented-safe to retry communicate() after a timeout
+            if CONTROL.cancelled():
+                kill_process_tree(proc)
+                raise ShellCancelled()
+            if _time.monotonic() - t0 >= timeout:
+                kill_process_tree(proc)
+                raise subprocess.TimeoutExpired(command, timeout)
+    except BaseException:
+        kill_process_tree(proc)
+        raise
+    finally:
+        CONTROL.untrack_proc(proc)
 
 
 def _get_index_tools() -> list:
@@ -592,6 +622,8 @@ def _run_command(ctx: ToolContext, command: str) -> ToolResult:
         return ToolResult(
             False, "", f"Command timed out after {ctx.shell_timeout}s: {command}"
         )
+    except ShellCancelled:
+        return ToolResult(False, "", "[cancelled by user]")
     except Exception as e:
         return ToolResult(False, "", f"Command failed: {e}")
 

@@ -1293,6 +1293,8 @@ class WellsApp(App[None]):
         self._graph_lock = threading.Lock()
         self._agent_state: dict = {}
         self._busy = False
+        # Bumped by every run and by /stop — see _run_input's finally block.
+        self._run_gen = 0
         # Live streaming region state (in-progress model output).
         self._live_buf = ""
         self._live_at = 0.0
@@ -1640,6 +1642,13 @@ class WellsApp(App[None]):
         if not text:
             return
 
+        # /stop is a hard kill switch — it must work even mid-approval-prompt
+        # or mid-anything-else, so it's checked before the pending-reply
+        # intercept below (which would otherwise swallow it as a y/N answer).
+        if text.lower() == "/stop":
+            self._hard_stop()
+            return
+
         # Handle pending interactive confirmations first.
         if self._pending:
             self._handle_pending_reply(text)
@@ -1705,6 +1714,10 @@ class WellsApp(App[None]):
         arg = args[0] if args else ""
 
         # -- Intercept blocking / TUI-only commands first ----------------------
+        if cmd == "/stop":
+            self._hard_stop()
+            return
+
         if cmd == "/resume":
             self._start_resume_picker(arg)
             return
@@ -1995,7 +2008,7 @@ class WellsApp(App[None]):
             )
             if self._busy:
                 self._input.placeholder = (
-                    "Working… type to queue · /steer redirects · /btw side chat · Esc cancels"
+                    "Working… type to queue · /steer redirects · /btw side chat · Esc cancels · /stop kills it"
                 )
             pend["event"].set()
 
@@ -2059,17 +2072,24 @@ class WellsApp(App[None]):
         self._agent_state["plan_mode"] = config.PLAN_MODE
         self._agent_state["workspace_root"] = config.WORKSPACE_ROOT
         self._busy = True
+        # Bumped on every run and on every /stop — a worker only gets to
+        # touch shared UI state (busy flag, input restore) if its generation
+        # still matches when it finishes. /stop bumps this immediately so an
+        # abandoned worker's eventual completion (Python can't force-kill a
+        # thread) is silently discarded instead of reviving the "busy" UI.
+        self._run_gen += 1
+        my_gen = self._run_gen
         # Input stays ENABLED: messages typed mid-run are queued, /btw chats
         # on the side, and the *_BUSY_SAFE_SLASH* commands run immediately.
         self._input.placeholder = (
-            "Working… type to queue · /steer redirects · /btw side chat · Esc cancels"
+            "Working… type to queue · /steer redirects · /btw side chat · Esc cancels · /stop kills it"
         )
         _cli._REPL_STATE["busy_since"] = _time.monotonic()
         self.write_log(f"\n[bold cyan]>[/bold cyan] {text}\n")
-        self._run_input(text)
+        self._run_input(text, my_gen)
 
     @work(thread=True)
-    def _run_input(self, text: str) -> None:
+    def _run_input(self, text: str, run_gen: int) -> None:
         """Run chat or task in a worker thread with redirected I/O."""
         import wells.cli as cli_mod
         from wells.cli import (
@@ -2142,8 +2162,12 @@ class WellsApp(App[None]):
             if cli_mod.console is tui_console:
                 cli_mod.console = orig_cli_console
 
-            self._busy = False
-            self.call_from_thread(self._restore_input)
+            if run_gen == self._run_gen:
+                self._busy = False
+                self.call_from_thread(self._restore_input)
+            # else: /stop already abandoned this generation and restored the
+            # UI itself — a newer run may already be in flight, so touching
+            # _busy/input here would corrupt its state.
 
     def _restore_input(self) -> None:
         import wells.cli as _cli
@@ -2269,6 +2293,50 @@ class WellsApp(App[None]):
                 "\n[yellow]Cancelling — stops after the current step…[/yellow]"
             )
 
+    def _hard_stop(self) -> None:
+        """`/stop` — force-terminate whatever is running, right now.
+
+        Escape/action_cancel_task is cooperative: it sets a flag that running
+        code checks at its next poll point (every ~250ms since the shell/LLM
+        cancellation fixes, but still a *wait*). /stop does not wait — it
+        kills every tracked subprocess immediately and stops the UI from
+        waiting on the worker thread at all. Python cannot force-kill a
+        thread, so an abandoned worker may still be finishing a single
+        blocked call somewhere in the background; the run-generation counter
+        (see _run_input's finally block) makes sure that outcome is discarded
+        instead of reviving the busy UI.
+        """
+        import wells.cli as _cli
+
+        # A blocked approval prompt is moot after a hard stop — deny it.
+        if self._pending and self._pending.get("kind") == "approval":
+            pend = self._pending
+            self._pending = None
+            pend["holder"]["ok"] = False
+            pend["event"].set()
+        else:
+            self._pending = None
+
+        was_busy = self._busy
+        CONTROL.cancel()
+        n = CONTROL.kill_tracked_procs()
+
+        if not was_busy and not n:
+            self.write_log("[dim]Nothing is running.[/dim]")
+            return
+
+        self._run_gen += 1  # abandon the current worker generation
+        self._busy = False
+        _cli._REPL_STATE["busy_since"] = None
+        CONTROL.set_activity("")
+
+        killed_s = f"killed {n} process(es); " if n else ""
+        self.write_log(
+            f"[bold red]⛔ HARD STOP[/bold red] — {killed_s}abandoned the "
+            f"running task. Ready for new input."
+        )
+        self._restore_input()
+
     def action_clear_log(self) -> None:
         self._log.clear()
 
@@ -2330,4 +2398,12 @@ def run_tui(resume_context: str | None = None) -> None:
     if not _ensure_model_configured():
         return
 
-    WellsApp(resume_context=resume_context).run(mouse=True)
+    try:
+        WellsApp(resume_context=resume_context).run(mouse=True)
+    except KeyboardInterrupt:
+        # Windows' ProactorEventLoop can raise a SECOND KeyboardInterrupt
+        # while it closes (asyncio.run's own cleanup polls the IOCP again),
+        # if Ctrl+C is pressed more than once in quick succession. The app
+        # has already exited by the time this surfaces — swallow the ugly
+        # traceback instead of dumping it on the user.
+        print("\n[wells] interrupted.")

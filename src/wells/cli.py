@@ -153,6 +153,14 @@ SLASH_COMMANDS: list[tuple[str, str, str]] = [
         "Usage: /steer <instruction>. Injected into the running agent's next "
         "reasoning round — changes course mid-task without cancelling.",
     ),
+    (
+        "/stop",
+        "Hard-kill the running task",
+        "Immediately kills any running shell command (and its whole process "
+        "tree) and abandons the in-flight model call — does not wait for a "
+        "cooperative checkpoint like Escape does. Works even mid-approval-"
+        "prompt. Use when Escape doesn't feel fast enough.",
+    ),
 ]
 
 
