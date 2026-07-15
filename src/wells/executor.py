@@ -159,7 +159,7 @@ def _tool_catalog(toolset: list[tools.ToolDef]) -> str:
 
 
 def _system_prompt(task: str, toolset: list[tools.ToolDef], *, plan_mode: bool,
-                   workspace: str | None = None) -> str:
+                   workspace: str | None = None, compact: bool = False) -> str:
     catalog = _tool_catalog(toolset)
     plan_note = (
         "\n\nIMPORTANT: You are in PLAN MODE. Do NOT make changes. Use read-only tools "
@@ -180,7 +180,7 @@ def _system_prompt(task: str, toolset: list[tools.ToolDef], *, plan_mode: bool,
     try:
         from wells import rules as _rules
         if workspace:
-            rules_block = _rules.engine_for(workspace).prompt_block()
+            rules_block = _rules.engine_for(workspace).prompt_block(compact=compact)
     except Exception:
         pass
     base = f"""You are an autonomous software engineering agent working inside a real code repository.
@@ -238,10 +238,14 @@ TOOL CALLING — MANDATORY:
 """
     # Principles always first (the constitution), then the skills index (so the
     # model knows which load_skill calls are available, without paying for the
-    # full bodies up front — progressive disclosure).
+    # full bodies up front — progressive disclosure). Skills are an advanced,
+    # optional capability — skipped in compact mode to save the (small) cost
+    # for a model that's already struggling to fit the essentials in its
+    # context window.
     out = inject_principles(base, workspace)
-    from wells import skills as _skills
-    out = _skills.inject_into_prompt(out, workspace)
+    if not compact:
+        from wells import skills as _skills
+        out = _skills.inject_into_prompt(out, workspace)
     return out
 
 
@@ -911,7 +915,22 @@ def run_executor(
     cap = max_steps if max_steps is not None else config.MAX_TOOL_STEPS
     profile = profile or config.ACTIVE_PROFILE
 
-    system = _system_prompt(task, toolset, plan_mode=ctx.plan_mode, workspace=ctx.workspace)
+    # Local models (commonly Ollama) often load with a small context window
+    # (Ollama's own default: 4096) regardless of what the model architecture
+    # supports — measured live, Wells' full system prompt alone can reach
+    # 4000+ tokens, leaving no room for the task, history, or a response
+    # before the runtime silently truncates something to make it fit. Detect
+    # this upfront and build a leaner prompt instead of guessing at a fix
+    # after the fact (raising the model's actual context window is possible
+    # but costs a multi-minute reload — see providers.warm_ollama_context;
+    # this is the free, always-safe mitigation).
+    model_label = config.providers.load_profile(profile)
+    compact_prompt = bool(
+        model_label and config.providers._looks_like_local_ollama(model_label)
+    )
+
+    system = _system_prompt(task, toolset, plan_mode=ctx.plan_mode, workspace=ctx.workspace,
+                            compact=compact_prompt)
     if system_prefix:
         system = f"{system_prefix}\n\n{system}"
 
@@ -932,7 +951,6 @@ def run_executor(
     if native_tools:
         llm = bound
 
-    model_label = config.providers.load_profile(profile)
     model_name = model_label.label() if model_label else profile
 
     # Visible ground truth for "why didn't the model act on that hint?" —

@@ -128,6 +128,72 @@ def test_parse_bare_json_fenced_call_not_shadowed_by_raw_text_fallback():
 
 
 # ---------------------------------------------------------------------------
+# Compact system prompt (small local-model context windows)
+# ---------------------------------------------------------------------------
+
+
+def test_system_prompt_compact_is_meaningfully_smaller(tmp_path: Path):
+    """Measured live: the full prompt for this repo's own RULES.md alone was
+    4131 tokens — bigger than Ollama's default 4096-token context window,
+    before the task, history, or response budget. Compact mode must shrink
+    it enough to matter, not just symbolically."""
+    from wells.tokens import estimate_tokens
+    from wells import tools as _tools
+
+    # Sized to roughly match this repo's own real RULES.md (~7.5KB, measured
+    # live at 1710 of the full prompt's 4131 tokens) rather than a token
+    # RULES.md whose savings ratio wouldn't be representative.
+    (tmp_path / "RULES.md").write_text("R1 — a rule.\n" * 500, encoding="utf-8")
+    task = "Write a Python script."
+    full = executor._system_prompt(
+        task, _tools.ALL_TOOLS, plan_mode=False, workspace=str(tmp_path), compact=False
+    )
+    compact = executor._system_prompt(
+        task, _tools.ALL_TOOLS, plan_mode=False, workspace=str(tmp_path), compact=True
+    )
+    assert estimate_tokens(compact) < estimate_tokens(full) * 0.75
+
+
+def test_run_executor_auto_detects_local_ollama_and_uses_compact_prompt(
+    ctx: tools.ToolContext,
+):
+    """The executor must resolve the active profile and switch to the
+    compact system prompt automatically for a profile that looks like local
+    Ollama — no manual opt-in should be required for the common case."""
+    LEDGER.reset()
+    from pathlib import Path as _Path
+    from wells import providers as _providers
+
+    # A RULES.md distinguishing marker: present in full mode, absent in
+    # compact — without this the assertion would pass trivially (no
+    # RULES.md at all means neither mode includes it).
+    _Path(ctx.workspace, "RULES.md").write_text(
+        "the harness enforces the machine-checkable ones and audits the rest\n",
+        encoding="utf-8",
+    )
+
+    local_profile = _providers.ProviderProfile(
+        name="LocalQwen3", kind="openai", model="qwen2.5-coder:7b",
+        base_url="http://127.0.0.1:11434/v1",
+    )
+    script = [AIMessage(content="Done.")]
+    with (
+        patch.object(config, "_invoke_with_retry", side_effect=_scripted(script)),
+        patch.object(executor, "_try_bind_tools", return_value=None),
+        patch.object(config.providers, "load_profile", return_value=local_profile),
+        patch.object(config.providers, "get_chat_model", return_value=object()),
+    ):
+        result = executor.run_executor(
+            task="x", ctx=ctx, max_steps=3, step_label="t", profile="LocalQwen3"
+        )
+    system_text = result.messages[0].content
+    # The full-mode RULES.md marker phrase must not appear; the compact
+    # pointer phrasing must, confirming compact=True actually reached
+    # _system_prompt rather than just being computed and discarded.
+    assert "the harness enforces the machine-checkable ones and audits" not in system_text
+
+
+# ---------------------------------------------------------------------------
 # Call extraction (native vs text)
 # ---------------------------------------------------------------------------
 

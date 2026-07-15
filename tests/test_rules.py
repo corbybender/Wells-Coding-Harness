@@ -136,6 +136,28 @@ def test_prompt_block_includes_rules_and_liabilities(engine: RulesEngine):
     assert "OPEN LIABILITIES" in block and "gpu-teardown" in block
 
 
+def test_prompt_block_compact_drops_full_rules_text_keeps_liabilities(engine: RulesEngine):
+    """compact=True must not silently drop safety visibility — open liabilities
+    (dynamic, small) stay in full; only the large static RULES.md prose (which
+    the deterministic check() enforcement doesn't depend on) is shortened."""
+    long_rule_text = "R1 — terminate paid resources.\n" * 50
+    Path(engine.workspace, "RULES.md").write_text(
+        f"# RULES\n{long_rule_text}", encoding="utf-8"
+    )
+    d = engine.check("run_command", {"command": "vastai create instance 3"})
+    engine.apply_liability(d, ok=True, simulated=False)
+
+    full = engine.prompt_block(compact=False)
+    compact = engine.prompt_block(compact=True)
+
+    assert long_rule_text.strip() in full
+    assert long_rule_text.strip() not in compact
+    assert len(compact) < len(full)
+    # The dynamic, safety-critical part must survive compaction unchanged.
+    assert "OPEN LIABILITIES" in compact and "gpu-teardown" in compact
+    assert "OPERATING RULES" in compact  # still points the model at it
+
+
 # ---------------------------------------------------------------------------
 # Executor integration
 # ---------------------------------------------------------------------------

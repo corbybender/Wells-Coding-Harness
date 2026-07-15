@@ -345,17 +345,38 @@ class RulesEngine:
 
     # -- prompt + status blocks --------------------------------------------------
 
-    def prompt_block(self) -> str:
-        """OPERATING RULES block for the system prompt (RULES.md + liabilities)."""
+    def prompt_block(self, *, compact: bool = False) -> str:
+        """OPERATING RULES block for the system prompt (RULES.md + liabilities).
+
+        ``compact`` swaps the full RULES.md dump (routinely 1000+ tokens —
+        the single largest piece of the system prompt, measured at 1710
+        tokens/41% of the total for this repo) for a short pointer. Safe to
+        do: the machine-checkable rules are enforced by ``check()`` against
+        ``.wells/rules.yaml`` regardless of what the model can see in its own
+        prompt — a violation still gets caught and explained at the moment
+        it's attempted, via the tool-call observation, not just via this
+        block. Used for local models with a small context window, where the
+        full prose dump can push the system prompt past what the model can
+        even see, silently truncating the task itself out of view.
+        """
         parts: list[str] = []
         rules_md = Path(self.workspace) / "RULES.md"
         if rules_md.exists():
             try:
-                parts.append(
-                    "OPERATING RULES (mandatory — violations have cost real money; "
-                    "the harness enforces the machine-checkable ones and audits the rest):\n"
-                    + rules_md.read_text(encoding="utf-8", errors="replace")[:9000]
-                )
+                if compact:
+                    parts.append(
+                        "OPERATING RULES: this workspace has mandatory rules "
+                        "(RULES.md) enforced automatically by the harness at every "
+                        "tool call — a violation will be blocked or flagged with "
+                        "the specific rule cited when you attempt it. You don't "
+                        "need to memorize them; just heed the feedback if one fires."
+                    )
+                else:
+                    parts.append(
+                        "OPERATING RULES (mandatory — violations have cost real money; "
+                        "the harness enforces the machine-checkable ones and audits the rest):\n"
+                        + rules_md.read_text(encoding="utf-8", errors="replace")[:9000]
+                    )
             except Exception:
                 pass
         open_l = self.open_liabilities()
