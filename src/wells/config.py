@@ -102,6 +102,17 @@ LLM_TIMEOUT: float = float(os.getenv("LLM_TIMEOUT", "180"))
 LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "5"))
 LLM_BACKOFF_BASE: float = float(os.getenv("LLM_BACKOFF_BASE", "2.0"))
 
+# Ollama (and other locally-served models) commonly load with a small default
+# context window (Ollama: 4096 tokens) regardless of what the model actually
+# supports — Wells' own system prompt (principles + rules + skills + tool
+# catalog) can approach or exceed that on its own, causing silent mid-run
+# truncation that reads as the model "losing the thread". Ollama's native API
+# accepts a per-request context-size override that reloads the model at that
+# size; the OpenAI-compatible endpoint (what profiles normally talk to) has
+# no equivalent, so Wells fires one native warm-up call per (endpoint, model)
+# before first use. 0 disables this entirely.
+OLLAMA_NUM_CTX: int = int(os.getenv("OLLAMA_NUM_CTX", "16384"))
+
 # --- Token optimization configuration -------------------------------------
 BUDGET = TokenBudget(
     max_input_tokens=int(os.getenv("TOKEN_BUDGET_MAX_INPUT", "24000")),

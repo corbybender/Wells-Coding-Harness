@@ -128,6 +128,126 @@ def test_chat_model_caching_openai_compatible(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Ollama context-window warm-up
+# ---------------------------------------------------------------------------
+
+
+def test_looks_like_local_ollama_by_kind():
+    prof = providers.ProviderProfile(name="x", kind="ollama", model="m")
+    assert providers._looks_like_local_ollama(prof) is True
+
+
+def test_looks_like_local_ollama_by_port():
+    prof = providers.ProviderProfile(
+        name="x", kind="openai", model="m", base_url="http://127.0.0.1:11434/v1"
+    )
+    assert providers._looks_like_local_ollama(prof) is True
+
+
+def test_looks_like_local_ollama_false_for_cloud_profile():
+    prof = providers.ProviderProfile(
+        name="x", kind="openai", model="m",
+        base_url="https://api.z.ai/api/coding/paas/v4/",
+    )
+    assert providers._looks_like_local_ollama(prof) is False
+
+
+def test_warm_ollama_context_hits_native_api_not_openai_compat(monkeypatch):
+    """The whole point: Ollama's OpenAI-compatible endpoint silently ignores
+    an equivalent field (confirmed live against a real Ollama instance), so
+    the warm-up must hit the native /api/chat root, stripping the /v1 suffix
+    the profile's base_url carries for normal conversation traffic."""
+    providers._OLLAMA_WARMED.clear()
+    calls = []
+
+    class FakeHttpx:
+        @staticmethod
+        def post(url, json, timeout):
+            calls.append((url, json))
+
+    monkeypatch.setitem(__import__("sys").modules, "httpx", FakeHttpx)
+    prof = providers.ProviderProfile(
+        name="LocalQwen3", kind="openai", model="qwen2.5-coder:7b",
+        base_url="http://127.0.0.1:11434/v1",
+    )
+    providers.warm_ollama_context(prof, num_ctx=16384)
+    assert len(calls) == 1
+    url, payload = calls[0]
+    assert url == "http://127.0.0.1:11434/api/chat"
+    assert payload["options"]["num_ctx"] == 16384
+    assert payload["model"] == "qwen2.5-coder:7b"
+
+
+def test_warm_ollama_context_skipped_when_disabled(monkeypatch):
+    providers._OLLAMA_WARMED.clear()
+    calls = []
+
+    class FakeHttpx:
+        @staticmethod
+        def post(url, json, timeout):
+            calls.append(url)
+
+    monkeypatch.setitem(__import__("sys").modules, "httpx", FakeHttpx)
+    prof = providers.ProviderProfile(
+        name="x", kind="ollama", model="m", base_url="http://127.0.0.1:11434"
+    )
+    providers.warm_ollama_context(prof, num_ctx=0)  # 0 = disabled
+    assert calls == []
+
+
+def test_warm_ollama_context_skipped_for_cloud_profile(monkeypatch):
+    providers._OLLAMA_WARMED.clear()
+    calls = []
+
+    class FakeHttpx:
+        @staticmethod
+        def post(url, json, timeout):
+            calls.append(url)
+
+    monkeypatch.setitem(__import__("sys").modules, "httpx", FakeHttpx)
+    prof = providers.ProviderProfile(
+        name="zai", kind="openai", model="glm-5.2",
+        base_url="https://api.z.ai/api/coding/paas/v4/",
+    )
+    providers.warm_ollama_context(prof, num_ctx=16384)
+    assert calls == []
+
+
+def test_warm_ollama_context_only_fires_once_per_endpoint_and_model(monkeypatch):
+    providers._OLLAMA_WARMED.clear()
+    calls = []
+
+    class FakeHttpx:
+        @staticmethod
+        def post(url, json, timeout):
+            calls.append(url)
+
+    monkeypatch.setitem(__import__("sys").modules, "httpx", FakeHttpx)
+    prof = providers.ProviderProfile(
+        name="x", kind="ollama", model="qwen2.5-coder:7b", base_url="http://127.0.0.1:11434"
+    )
+    providers.warm_ollama_context(prof, num_ctx=16384)
+    providers.warm_ollama_context(prof, num_ctx=16384)
+    assert len(calls) == 1
+
+
+def test_warm_ollama_context_never_raises_on_network_failure(monkeypatch):
+    """A local dev server being briefly unreachable must never break the run."""
+    providers._OLLAMA_WARMED.clear()
+
+    class FakeHttpx:
+        @staticmethod
+        def post(url, json, timeout):
+            raise ConnectionError("no route to host")
+
+    monkeypatch.setitem(__import__("sys").modules, "httpx", FakeHttpx)
+    prof = providers.ProviderProfile(
+        name="x", kind="ollama", model="m", base_url="http://127.0.0.1:11434"
+    )
+    providers.warm_ollama_context(prof, num_ctx=16384)  # must not raise
+
+
+# ---------------------------------------------------------------------------
 # Settings: .env round-trip (comment-preserving)
 # ---------------------------------------------------------------------------
 

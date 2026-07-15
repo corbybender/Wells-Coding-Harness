@@ -233,12 +233,78 @@ def available_profiles() -> list[str]:
     return names
 
 
+# (base_url, model) pairs already warmed this process — avoids re-issuing a
+# reload (a multi-second, model-reloading call) on every run_executor() call
+# within the same session; a fresh interpreter re-warms once, harmlessly.
+_OLLAMA_WARMED: set[tuple[str, str]] = set()
+
+
+def _looks_like_local_ollama(profile: ProviderProfile) -> bool:
+    """Heuristic: is this profile actually talking to a local Ollama server?
+
+    True for the native ``ollama`` provider kind, and for ``openai``-kind
+    profiles whose base_url points at Ollama's default port — the common
+    case, since most Wells local-model profiles use Ollama's OpenAI-
+    compatible shim (``http://127.0.0.1:11434/v1``) rather than the native
+    langchain-ollama integration.
+    """
+    if profile.kind == "ollama":
+        return True
+    return ":11434" in (profile.base_url or "")
+
+
+def warm_ollama_context(profile: ProviderProfile, *, num_ctx: int) -> None:
+    """Best-effort: ask Ollama to (re)load ``profile.model`` with a larger
+    context window than its server-side default (commonly 4096, regardless
+    of what the model architecturally supports).
+
+    Only Ollama's *native* API (``/api/chat`` with ``options.num_ctx``)
+    honors a per-request context override and reloads the running model at
+    that size; the OpenAI-compatible endpoint (what Wells profiles normally
+    talk to) silently ignores an equivalent field. Since the context size is
+    a property of the currently-loaded model instance — not renegotiated
+    per request — one native warm-up call before a run raises the ceiling
+    for every subsequent request against that model, regardless of which
+    endpoint carries the actual conversation.
+
+    Never raises: a local dev server being briefly unreachable, slow, or
+    running a version that doesn't support this must not break the run —
+    worst case, the model stays at whatever context it already had.
+    """
+    if num_ctx <= 0 or not _looks_like_local_ollama(profile):
+        return
+    key = (profile.base_url, profile.model)
+    if key in _OLLAMA_WARMED:
+        return
+    root = (profile.base_url or "http://127.0.0.1:11434").rstrip("/")
+    if root.endswith("/v1"):
+        root = root[: -len("/v1")]
+    try:
+        import httpx
+        httpx.post(
+            f"{root}/api/chat",
+            json={
+                "model": profile.model,
+                "messages": [{"role": "user", "content": ""}],
+                "stream": False,
+                "options": {"num_ctx": num_ctx},
+            },
+            timeout=60.0,
+        )
+    except Exception:
+        return
+    _OLLAMA_WARMED.add(key)
+
+
 def _build_chat_model(profile: ProviderProfile, *, temperature: float, timeout: float):
     """Construct the LangChain chat model for ``profile`` (lazy provider import).
 
     Raises a clear error naming the missing package when an optional provider
     is requested but not installed.
     """
+    from wells import config as _config
+    warm_ollama_context(profile, num_ctx=_config.OLLAMA_NUM_CTX)
+
     kind = profile.kind
     if kind not in _KIND_TABLE:
         raise ValueError(

@@ -133,6 +133,10 @@ def _print_info() -> None:
         f"  Summarize on loop  : {'on' if config.SUMMARIZE_ON_LOOP else 'off'} "
         f"(threshold {config.SUMMARIZE_THRESHOLD})"
     )
+    print(
+        f"  Ollama num_ctx     : {config.OLLAMA_NUM_CTX or 'off'} "
+        "(native-API context-window warm-up for local Ollama profiles)"
+    )
     # Show the active principles source so users know which AGENT.md is in effect.
     try:
         from wells import principles
