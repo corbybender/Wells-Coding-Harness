@@ -435,6 +435,60 @@ def test_loop_accepts_immediate_honest_blocker_report(ctx: tools.ToolContext):
     assert "can't proceed" in result.summary
 
 
+def test_loop_stops_on_invented_tool_name_even_with_varied_args(ctx: tools.ToolContext):
+    """Reproduces the live runaway: qwen2.5-coder invented a "report_error"
+    tool that doesn't exist, and dodged the identical-args repeat detector
+    by rewording the error message slightly each call — 170+ rounds with no
+    progress before it was killed by hand. The harness must catch this by
+    tool-name validity, not exact-args equality, and hard-stop."""
+    LEDGER.reset()
+    # Every call targets the same nonexistent tool but with different args
+    # each time, exactly like the live failure — this must NOT reset the
+    # identical-args repeat counter's evasion of the old detector.
+    script = [
+        AIMessage(content=(
+            '<tool_call>{"name": "report_error", '
+            f'"args": {{"error_message": "attempt number {i}"}}}}</tool_call>'
+        ))
+        for i in range(20)
+    ]
+    with (
+        patch.object(config, "_invoke_with_retry", side_effect=_scripted(script)),
+        patch.object(executor, "_try_bind_tools", return_value=None),
+    ):
+        result = executor.run_executor(
+            task="write tree.py", ctx=ctx, max_steps=0, step_label="t"
+        )
+    assert result.stopped_reason == "stuck_loop"
+    assert result.steps_taken == 6
+    assert all(c["name"] == "report_error" for c in result.tool_calls)
+
+
+def test_loop_unknown_tool_streak_resets_on_valid_call(ctx: tools.ToolContext, workspace: Path):
+    """A single valid tool call in between invented ones must reset the
+    streak — this guards against a false-positive stop on a model that's
+    genuinely working and just fat-fingers a tool name once in a while."""
+    LEDGER.reset()
+    script = [
+        AIMessage(content='<tool_call>{"name": "bogus_tool", "args": {}}</tool_call>'),
+        AIMessage(content='<tool_call>{"name": "bogus_tool", "args": {"x": 1}}</tool_call>'),
+        AIMessage(content=(
+            '<tool_call>{"name": "read_file", "args": {"path": "maths.py"}}</tool_call>'
+        )),
+        AIMessage(content='<tool_call>{"name": "bogus_tool", "args": {}}</tool_call>'),
+        AIMessage(content='<tool_call>{"name": "bogus_tool", "args": {"y": 2}}</tool_call>'),
+        AIMessage(content="Done."),
+    ]
+    with (
+        patch.object(config, "_invoke_with_retry", side_effect=_scripted(script)),
+        patch.object(executor, "_try_bind_tools", return_value=None),
+    ):
+        result = executor.run_executor(
+            task="x", ctx=ctx, max_steps=10, step_label="t"
+        )
+    assert result.stopped_reason == "done"
+
+
 def test_loop_gives_up_after_exhausting_stall_nudges(ctx: tools.ToolContext):
     """If the model never calls a tool despite repeated coaching, the harness
     stops rather than nudging forever."""

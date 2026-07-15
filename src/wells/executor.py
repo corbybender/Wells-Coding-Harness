@@ -929,6 +929,8 @@ def run_executor(
     _fail_patterns: dict[str, int] = {}                  # command prefix → fail count
     _last_call_key: str | None = None                    # name+args of the previous call
     _last_call_repeat = 0                                 # consecutive repeats of that call
+    _unknown_tool_streak = 0    # consecutive calls to a name not in toolset
+    _known_tool_names = {t.name for t in toolset}
 
     def _stopped(reason: str, summary: str) -> ExecutorResult:
         return ExecutorResult(
@@ -1240,6 +1242,43 @@ def run_executor(
             if CONTROL.cancelled():
                 return _stopped("cancelled", "(cancelled by user)")
             obs_text = result.to_model_text()
+
+            # ── Invalid-tool-name streak ─────────────────────────────────────
+            # Keyed on whether `name` is a real tool, not on exact args — a
+            # model that invents a tool (e.g. "report_error") can dodge the
+            # identical-args repeat detector below just by rewording the
+            # message each time while calling the same nonexistent tool over
+            # and over. Tracking validity instead of exact args closes that
+            # gap: rewording doesn't reset this counter, only actually
+            # switching to a real tool does.
+            if name not in _known_tool_names:
+                _unknown_tool_streak += 1
+            else:
+                _unknown_tool_streak = 0
+            if _unknown_tool_streak == 3:
+                catalog_names = ", ".join(sorted(_known_tool_names))
+                obs_text = obs_text + (
+                    f"\n\n[HARNESS: '{name}' is not a real tool — you have now "
+                    f"invented a nonexistent tool name {_unknown_tool_streak} times "
+                    f"in a row. The ONLY tools that exist are: {catalog_names}. "
+                    f"Pick one of those, or if none fits, stop and describe the "
+                    f"blocker in plain text with no tool call.]"
+                )
+                _ui("warn", f"  [bold yellow]⚠ invented tool name "
+                            f"'{name}' called {_unknown_tool_streak}× in a row — "
+                            f"model told the real tool list[/bold yellow]")
+            if _unknown_tool_streak >= 6:
+                _ui("warn", f"  [bold red]⛔ stuck loop — model kept inventing "
+                            f"nonexistent tool names ({_unknown_tool_streak}× in a "
+                            f"row), stopping the run[/bold red]")
+                messages.append(
+                    _tool_message(obs_text, tool_call_id=tcid, name=name, ai_message=resp)
+                )
+                return _stopped(
+                    "stuck_loop",
+                    f"(stopped: model called nonexistent tool names "
+                    f"{_unknown_tool_streak} times in a row with no progress)",
+                )
 
             # ── Stuck-loop warning ───────────────────────────────────────────
             # Unlike _fail_patterns below (which only fires on *failed* shell
