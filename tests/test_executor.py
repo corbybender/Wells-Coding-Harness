@@ -399,6 +399,47 @@ def test_loop_handles_bare_json_call_from_qwen_style_model(
 
 
 # ---------------------------------------------------------------------------
+# WorkingMemory task re-anchoring
+# ---------------------------------------------------------------------------
+
+
+def test_working_memory_not_empty_with_only_task_set():
+    """Regression: is_empty() used to ignore `task` entirely, so on round 1
+    (before any tool call populates files_modified/etc.) WorkingMemory was
+    considered empty and never injected — the goal reminder only started
+    appearing after the model had already taken its first action."""
+    wm = executor.WorkingMemory(task="write tree.py")
+    assert wm.is_empty() is False
+
+
+def test_working_memory_empty_with_nothing_set():
+    wm = executor.WorkingMemory()
+    assert wm.is_empty() is True
+
+
+def test_working_memory_to_xml_includes_prominent_task_anchor():
+    wm = executor.WorkingMemory(task="write tree.py")
+    xml = wm.to_xml()
+    assert "write tree.py" in xml
+    assert "YOUR GOAL" in xml  # loud framing, not just a plain <task> tag
+
+
+def test_inject_wm_fires_on_round_one_before_any_tool_call():
+    """The task reminder must reach the model's very first round, not only
+    after files_modified/etc. become non-empty from a prior tool call."""
+    wm = executor.WorkingMemory(task="write tree.py")
+    messages = [
+        SystemMessage(content="sys"),
+        HumanMessage(content="Please complete this task:\nwrite tree.py"),
+    ]
+    result = executor._inject_wm(messages, wm)
+    assert any(
+        isinstance(m, HumanMessage) and "YOUR GOAL" in (m.content or "")
+        for m in result
+    )
+
+
+# ---------------------------------------------------------------------------
 # Context-trim budget (config.BUDGET/SMALL_BUDGET consolidation)
 # ---------------------------------------------------------------------------
 

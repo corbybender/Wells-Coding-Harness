@@ -517,14 +517,31 @@ class WorkingMemory:
                 self.failed_commands.append(entry)
 
     def is_empty(self) -> bool:
-        return not any([self.files_modified, self.files_read,
+        # `task` counts as non-empty content: without it, WorkingMemory is
+        # never injected until the first tool call succeeds (nothing else is
+        # populated yet on round 1), so a model that's about to drift off
+        # the goal from its very first move gets no re-anchor at all until
+        # it's already one step down the wrong path.
+        return not any([self.task, self.files_modified, self.files_read,
                         self.failed_commands, self.test_status,
                         self.open_liabilities])
 
     def to_xml(self) -> str:
         parts = [_WM_TAG]
         if self.task:
-            parts.append(f"  <task>{self.task[:300]}</task>")
+            # Loud, unmissable framing rather than a small XML tag buried
+            # among other fields — observed live, a model can keep making
+            # mechanically valid tool calls (real tool, real args, real
+            # success) while drifting completely off the actual goal over
+            # many rounds; a plain <task> tag it's easy to skim past every
+            # round didn't stop that. This doesn't detect drift (see the
+            # dedicated drift-detection work), it just makes the goal harder
+            # to lose track of in the first place, for near-zero cost.
+            parts.append(
+                "  ══ YOUR GOAL — do not drift from this, no matter how "
+                "many rounds have passed ══\n"
+                f"  <task>{self.task[:500]}</task>"
+            )
         if self.files_modified:
             parts.append(
                 f"  <files_modified>{', '.join(self.files_modified[-12:])}</files_modified>"
