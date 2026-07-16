@@ -24,6 +24,7 @@ into the shared :class:`AgentState`.
 
 from __future__ import annotations
 
+import difflib
 import json
 import re
 from dataclasses import dataclass, field
@@ -589,6 +590,45 @@ def _inject_wm(messages: list[BaseMessage], wm: WorkingMemory) -> list[BaseMessa
 
 
 # ---------------------------------------------------------------------------
+# Task-drift detection
+# ---------------------------------------------------------------------------
+#
+# Every other backstop in this module catches a model doing something
+# mechanically wrong (bad tool name, malformed JSON, identical repeat). None
+# of them catch a model doing everything mechanically *right* — real tool,
+# valid args, succeeds — while the actual content drifts off the goal.
+# Observed live: a 7B model asked to write a tree-sitter-based function
+# extractor rewrote the same file's full content across several rounds as a
+# tree-sitter parser, then an unrelated binary-tree printer, then a
+# height-based tree-printer, then degenerated to alternating `print(1)` /
+# `print('Hello, world!')` — every write_file call individually valid, zero
+# progress toward the goal.
+#
+# Signal: successive full-file rewrites of the SAME path via write_file that
+# share very little text with the immediately previous version. A model
+# incrementally building toward a goal keeps most of its own prior structure
+# between writes; one that's thrashing/free-associating tends to replace the
+# whole thing with something largely unrelated to what it just wrote,
+# repeatedly. difflib.SequenceMatcher's ratio() is a cheap, stdlib-only,
+# dependency-free similarity measure — good enough for a coarse "is this even
+# related to what I wrote last time" signal; it isn't trying to judge
+# relevance to the *task*, just to itself.
+
+_DRIFT_SIMILARITY_THRESHOLD = float(
+    __import__("os").environ.get("WELLS_DRIFT_SIMILARITY", "0.3")
+)
+_DRIFT_NUDGE_AT = 2   # consecutive low-similarity rewrites before nudging
+_DRIFT_STOP_AT = 4    # consecutive low-similarity rewrites before hard stop
+
+
+def _rewrite_similarity(old: str, new: str) -> float:
+    """0..1 text similarity between two versions of the same file's content."""
+    if not old and not new:
+        return 1.0
+    return difflib.SequenceMatcher(None, old, new).ratio()
+
+
+# ---------------------------------------------------------------------------
 # Observation masking (primary context management)
 # ---------------------------------------------------------------------------
 
@@ -1061,6 +1101,9 @@ def run_executor(
     _last_call_repeat = 0                                 # consecutive repeats of that call
     _unknown_tool_streak = 0    # consecutive calls to a name not in toolset
     _known_tool_names = {t.name for t in toolset}
+    _file_write_history: dict[str, str] = {}   # path → most recent full content written
+    _drift_streak = 0           # consecutive low-similarity full rewrites of one path
+    _drift_path: str | None = None
 
     def _stopped(reason: str, summary: str) -> ExecutorResult:
         return ExecutorResult(
@@ -1526,6 +1569,44 @@ def run_executor(
                             f"{_short_path(_checked_path)}[/yellow]",
                         )
 
+            # ── Task-drift detection ────────────────────────────────────────
+            # See the module-level comment above _rewrite_similarity for the
+            # full rationale. Scoped to write_file specifically (the observed
+            # failure mode): a full-content replacement, not an incremental
+            # edit_file patch, is what "thrashing" actually looks like.
+            if name == "write_file" and result.ok and not result.simulated:
+                _wpath = str(args.get("path") or args.get("file_path") or "")
+                _new_content = str(args.get("content", ""))
+                if _wpath:
+                    _prev_content = _file_write_history.get(_wpath)
+                    if _prev_content is not None:
+                        _sim = _rewrite_similarity(_prev_content, _new_content)
+                        if _sim < _DRIFT_SIMILARITY_THRESHOLD:
+                            if _drift_path == _wpath:
+                                _drift_streak += 1
+                            else:
+                                _drift_path = _wpath
+                                _drift_streak = 1
+                        elif _drift_path == _wpath:
+                            _drift_streak = 0
+                            _drift_path = None
+                    _file_write_history[_wpath] = _new_content
+
+                    if _drift_streak == _DRIFT_NUDGE_AT:
+                        obs_text = obs_text + (
+                            f"\n\n[HARNESS: Your last {_drift_streak} rewrites of "
+                            f"'{_short_path(_wpath)}' have each replaced almost "
+                            f"everything from the version before — not refining it, "
+                            f"replacing it. That pattern usually means you've lost "
+                            f"track of the actual goal:\n{task[:400]}\n"
+                            f"Stop and check your last write against that goal before "
+                            f"writing again. If you're stuck, say so instead of "
+                            f"rewriting again.]"
+                        )
+                        _ui("warn", f"  [bold yellow]⚠ {_drift_streak} unrelated "
+                                    f"full rewrites of {_short_path(_wpath)} in a row "
+                                    f"— model shown the original goal again[/bold yellow]")
+
             # ── Stuck-loop detection ───────────────────────────────────────
             # Inject a note into obs_text when the same command fails 3+ times
             # so the model knows to stop retrying and report the blocker.
@@ -1586,6 +1667,23 @@ def run_executor(
                     "stuck_loop",
                     f"(stopped: {name} was called with identical arguments "
                     f"{_last_call_repeat} times in a row with no progress)",
+                )
+
+            # ── Task-drift hard stop ────────────────────────────────────────
+            # The nudge above gives the model a chance to notice and correct;
+            # if it keeps thrashing anyway, stop rather than burn the rest of
+            # the step budget on rewrites that were never converging.
+            if _drift_streak >= _DRIFT_STOP_AT:
+                _ui("warn", f"  [bold red]⛔ task drift — {_drift_streak} "
+                            f"unrelated full rewrites of "
+                            f"{_short_path(_drift_path or '')} in a row with no "
+                            f"convergence toward the goal, stopping the "
+                            f"run[/bold red]")
+                return _stopped(
+                    "stuck_loop",
+                    f"(stopped: {_drift_streak} consecutive rewrites of "
+                    f"'{_drift_path}' each replaced almost everything from the "
+                    f"version before, with no convergence toward the goal)",
                 )
 
         if cap and steps >= cap:

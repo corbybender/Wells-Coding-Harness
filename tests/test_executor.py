@@ -655,6 +655,107 @@ def test_loop_accepts_immediate_honest_blocker_report(ctx: tools.ToolContext):
     assert "can't proceed" in result.summary
 
 
+# ---------------------------------------------------------------------------
+# Task-drift detection
+# ---------------------------------------------------------------------------
+
+
+def test_rewrite_similarity_high_for_incremental_edit():
+    old = "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - b\n"
+    new = "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - b - 1\n"
+    assert executor._rewrite_similarity(old, new) > 0.8
+
+
+def test_rewrite_similarity_low_for_unrelated_replacement():
+    old = (
+        "from tree_sitter import Language, Parser\n"
+        "def extract_functions(path):\n    ...\n"
+    )
+    new = "def print_tree(node):\n    print(node.value)\n    for c in node.children:\n        print_tree(c)\n"
+    assert executor._rewrite_similarity(old, new) < 0.3
+
+
+def test_loop_drift_nudge_then_hard_stop_on_thrashing_rewrites(
+    ctx: tools.ToolContext, workspace: Path
+):
+    """Reproduces the live failure that survived every other fix tonight:
+    qwen kept validly calling write_file on the same path — real tool, valid
+    JSON, succeeds every time — while the content itself drifted completely
+    off the goal (tree-sitter parser -> unrelated binary-tree printer ->
+    print('Hello, world!')), never converging, never touching
+    repository_map.json. No mechanical check (bad tool name, malformed JSON,
+    identical args) catches this; only content-similarity tracking does."""
+    LEDGER.reset()
+    # Each version genuinely unrelated to the last (not just topically off —
+    # near-zero shared text), matching how little the live failure's
+    # successive rewrites actually had in common with each other.
+    unrelated_contents = [
+        "from tree_sitter import Language, Parser\ndef extract_functions(path):\n"
+        "    tree = parser.parse(path)\n    return tree.root_node\n",
+        '{"name": "config", "version": 2, "settings": {"debug": true, "level": 5}}\n',
+        "SELECT id, name, email FROM users WHERE active = 1 ORDER BY created_at DESC;\n",
+        "| Column | Type | Description |\n|--------|------|-------------|\n"
+        "| id | int | primary key |\n",
+        "#!/bin/bash\necho 'deploying'\nrsync -avz ./dist/ user@host:/var/www/\n",
+        "print(1)\n",
+    ]
+    import json as _json
+    script = [
+        AIMessage(content=(
+            "<tool_call>"
+            + _json.dumps({"name": "write_file", "args": {"path": "tree.py", "content": content}})
+            + "</tool_call>"
+        ))
+        for content in unrelated_contents
+    ]
+    with (
+        patch.object(config, "_invoke_with_retry", side_effect=_scripted(script)),
+        patch.object(executor, "_try_bind_tools", return_value=None),
+    ):
+        result = executor.run_executor(
+            task="Write a tree-sitter based function extractor to repository_map.json",
+            ctx=ctx, max_steps=0, step_label="t",
+        )
+    assert result.stopped_reason == "stuck_loop"
+    assert result.steps_taken < len(unrelated_contents)  # stopped before exhausting the script
+    assert all(c["name"] == "write_file" for c in result.tool_calls)
+
+
+def test_loop_incremental_refinement_never_triggers_drift_stop(
+    ctx: tools.ToolContext, workspace: Path
+):
+    """False-positive guard: a model genuinely, incrementally refining the
+    same file (each version mostly sharing the last one's structure) must
+    never be caught by the drift detector — only wholesale, repeated,
+    unrelated replacement should be."""
+    LEDGER.reset()
+    import json as _json
+    refinements = [
+        "def extract_functions(path):\n    pass\n",
+        "def extract_functions(path):\n    tree = parse(path)\n    return tree\n",
+        "def extract_functions(path):\n    tree = parse(path)\n    return tree.root_node\n",
+        "def extract_functions(path):\n    tree = parse(path)\n    return walk(tree.root_node)\n",
+        "def extract_functions(path):\n    tree = parse(path)\n    return walk(tree.root_node)\n\ndef walk(node):\n    return []\n",
+    ]
+    script = [
+        AIMessage(content=(
+            "<tool_call>"
+            + _json.dumps({"name": "write_file", "args": {"path": "tree.py", "content": c}})
+            + "</tool_call>"
+        ))
+        for c in refinements
+    ] + [AIMessage(content="Done.")]
+    with (
+        patch.object(config, "_invoke_with_retry", side_effect=_scripted(script)),
+        patch.object(executor, "_try_bind_tools", return_value=None),
+    ):
+        result = executor.run_executor(
+            task="write tree.py", ctx=ctx, max_steps=10, step_label="t"
+        )
+    assert result.stopped_reason == "done"
+    assert result.steps_taken == len(refinements)
+
+
 def test_loop_stops_on_invented_tool_name_even_with_varied_args(ctx: tools.ToolContext):
     """Reproduces the live runaway: qwen2.5-coder invented a "report_error"
     tool that doesn't exist, and dodged the identical-args repeat detector
