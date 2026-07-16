@@ -455,6 +455,86 @@ def test_read_after_write_in_same_batch_sees_fresh_content(
 
 
 # ---------------------------------------------------------------------------
+# Streaming repetition kill-switch
+# ---------------------------------------------------------------------------
+
+
+def test_tail_repetition_detects_degenerate_loop():
+    assert executor._tail_repetition("I will now fix it. " * 5) is True
+    assert executor._tail_repetition("print(1)\n" * 6) is True
+
+
+def test_tail_repetition_ignores_normal_text_and_banners():
+    assert executor._tail_repetition(
+        "Read the file, found the bug on line 3, fixing it now with an edit."
+    ) is False
+    assert executor._tail_repetition("=" * 400) is False  # banner, not a loop
+    assert executor._tail_repetition("- " * 200) is False  # low-variety unit
+    assert executor._tail_repetition("short") is False
+
+
+def test_stream_invoke_guard_aborts_early():
+    from langchain_core.messages import AIMessageChunk
+    from wells.control import CONTROL
+
+    CONTROL.reset()
+    consumed = []
+
+    class _RepeatingLLM:
+        def stream(self, messages):
+            for i in range(50):
+                consumed.append(i)
+                yield AIMessageChunk(content="I will now fix the bug. ")
+
+    resp, streamed, aborted = executor._stream_invoke(
+        _RepeatingLLM(), [], display=False, guard=True
+    )
+    assert aborted is True
+    assert resp is not None
+    assert len(consumed) < 50, "stream ran to completion despite the guard"
+
+
+def test_loop_guard_abort_nudges_then_recovers(ctx: tools.ToolContext, workspace: Path):
+    from langchain_core.messages import AIMessageChunk
+    from wells import providers as _providers
+    from wells.control import CONTROL
+
+    CONTROL.reset()
+    LEDGER.reset()
+    scripts = iter([
+        ["Fixing. " ] + ["I will now fix it. "] * 20,   # degenerate → aborted
+        ['<tool_call>{"name": "read_file", "args": {"path": "maths.py"}}</tool_call>'],
+        ["All finished; the file was reviewed."],
+    ])
+
+    class _FakeStreamLLM:
+        def stream(self, messages):
+            for piece in next(scripts):
+                yield AIMessageChunk(content=piece)
+
+    local = _providers.ProviderProfile(
+        name="q", kind="openai", model="qwen2.5-coder:7b",
+        base_url="http://127.0.0.1:11434/v1",
+    )
+    with (
+        patch.object(config, "STRUCTURED_OUTPUTS", False),
+        patch.object(config, "STREAM_GUARD", True),
+        patch.object(executor, "_try_bind_tools", return_value=None),
+        patch.object(config.providers, "load_profile", return_value=local),
+        patch.object(config.providers, "get_chat_model", return_value=_FakeStreamLLM()),
+    ):
+        result = executor.run_executor(
+            task="review maths.py", ctx=ctx, max_steps=5,
+            step_label="t", profile="LocalQwen3",
+        )
+    assert result.stopped_reason == "done"
+    assert "All finished" in result.summary
+    nudges = [m for m in result.messages
+              if isinstance(m, HumanMessage) and "repeating the same text" in (m.content or "")]
+    assert len(nudges) == 1
+
+
+# ---------------------------------------------------------------------------
 # Read-only dedupe cache
 # ---------------------------------------------------------------------------
 

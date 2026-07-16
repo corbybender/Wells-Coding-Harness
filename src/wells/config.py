@@ -257,6 +257,14 @@ PLAN_MODE: bool = os.getenv("PLAN_MODE", "0") not in ("0", "false", "no", "")
 # Stream output to the console during generation if the model supports it.
 STREAM_OUTPUT: bool = os.getenv("STREAM_OUTPUT", "1") not in ("0", "false", "no", "")
 
+# Repetition kill-switch: for local (compact-prompt) profiles, stream the
+# generation internally and abort it the moment the output degenerates into
+# verbatim self-repetition ("I will now fix it. I will now fix it. ..." —
+# a classic small-model failure). Closing the stream makes Ollama stop
+# generating, so a doomed reply costs seconds instead of running to the
+# token limit or the request timeout. Set 0 to disable.
+STREAM_GUARD: bool = os.getenv("WELLS_STREAM_GUARD", "1") not in ("0", "false", "no", "")
+
 # Intent routing: when the heuristic can't decide auto vs orchestrate, ask the
 # cheap model (adds a full round-trip before ANY work starts). Default off —
 # ambiguous requests route to auto, which handles everything; /orchestrate

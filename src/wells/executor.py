@@ -1236,6 +1236,7 @@ def run_executor(
     rounds = 0
     stall_nudges = 0
     failure_ack_nudges = 0
+    _rep_abort_nudges = 0   # generations aborted by the repetition guard
     total_saved = 0
     _read_ranges: dict[str, list[tuple[int, int]]] = {}  # path → [(offset, end), ...]
     _fail_patterns: dict[str, int] = {}                  # command prefix → fail count
@@ -1394,9 +1395,16 @@ def run_executor(
         rounds += 1
         _act(f"thinking · round {rounds} · step {steps}/{cap_s}")
         streamed_this_round = False
+        gen_aborted = False
+        # The repetition guard needs a live stream to act on; it applies to
+        # compact (local) profiles, where degenerate loops actually happen
+        # and where every wasted generation second is felt.
+        _guard_stream = compact_prompt and config.STREAM_GUARD
         try:
-            if stream:
-                resp, streamed_this_round = _stream_invoke(llm, messages)
+            if stream or _guard_stream:
+                resp, streamed_this_round, gen_aborted = _stream_invoke(
+                    llm, messages, display=stream, guard=_guard_stream
+                )
             else:
                 resp = _invoke_cancelable(llm, messages)
         except Exception as e:
@@ -1454,6 +1462,28 @@ def run_executor(
             _ui("round", f"\n[dim]Round {rounds}  (step {steps + 1}/{cap_s})[/dim]")
 
         if not calls:
+            # A guard-aborted reply with no parseable call is repetition
+            # garbage, never a final answer — coach once and re-roll rather
+            # than accepting (or salvaging from) a degenerate loop's output.
+            if gen_aborted:
+                _rep_abort_nudges += 1
+                _ui("warn", f"  [bold yellow]⚠ generation aborted — output was "
+                            f"repeating itself (attempt {_rep_abort_nudges}/3)"
+                            f"[/bold yellow]")
+                if _rep_abort_nudges >= 3:
+                    return _stopped(
+                        "stuck_loop",
+                        "(stopped: the model's output degenerated into verbatim "
+                        "self-repetition on 3 consecutive replies)",
+                    )
+                messages.append(HumanMessage(content=(
+                    "[HARNESS: Your previous reply was cut off because it was "
+                    "repeating the same text over and over. Do not repeat "
+                    "yourself. Continue the task with ONE concise reply — a "
+                    "tool call if action is needed, or a short final summary "
+                    "if the task is done.]"
+                )))
+                continue
             # Zero tool calls with zero real action taken so far this run is
             # almost never a genuine finish for a task that requires changes —
             # it's a model (usually a small/local one) that ignored the
@@ -2103,24 +2133,64 @@ def _invoke_cancelable(llm, messages) -> BaseMessage | None:
         ex.shutdown(wait=False)
 
 
-def _stream_invoke(llm, messages) -> tuple[BaseMessage | None, bool]:
-    """Invoke the model with live token streaming to stdout.
+# Repetition kill-switch tuning: a "unit" of at least _REP_MIN_UNIT chars
+# repeated _REP_MIN_REPEATS times verbatim at the very end of the output is
+# degenerate looping, not writing. Units are capped so the rolling buffer
+# (and each check) stays O(1) per chunk.
+_REP_MIN_UNIT = 6
+_REP_MAX_UNIT = 120
+_REP_MIN_REPEATS = 4
 
-    Returns ``(response, streamed_text)``. Chunks are aggregated with ``+`` so
-    the final message carries merged tool_calls/usage exactly like invoke.
-    Falls back to a normal retry-invoke when the provider can't stream.
-    Checks the cancel flag between chunks so Escape lands mid-answer.
 
-    Chunks go through the CONTROL event bus (``llm_chunk``/``llm_done``) when
-    a listener is registered — the TUI renders them into a live region as
-    they arrive instead of waiting for full lines. Without a listener (plain
-    CLI), they fall back to stdout as before.
+def _tail_repetition(text: str) -> bool:
+    """True when ``text`` ends in >= _REP_MIN_REPEATS verbatim repeats of one unit.
+
+    Degenerate generation loops are exactly periodic ("I will now fix it. I
+    will now fix it. ..."), so a strict endswith(unit * N) check catches them
+    while leaving legitimately repetitive text (tables, banners) alone —
+    units with fewer than 3 distinct characters (``====``, whitespace runs)
+    are ignored entirely.
+    """
+    if len(text) < _REP_MIN_UNIT * _REP_MIN_REPEATS:
+        return False
+    tail = text[-(_REP_MAX_UNIT * _REP_MIN_REPEATS):]
+    max_unit = min(_REP_MAX_UNIT, len(tail) // _REP_MIN_REPEATS)
+    for unit_len in range(_REP_MIN_UNIT, max_unit + 1):
+        unit = tail[-unit_len:]
+        if len(set(unit.strip() or unit)) < 3:
+            continue
+        if tail.endswith(unit * _REP_MIN_REPEATS):
+            return True
+    return False
+
+
+def _stream_invoke(
+    llm, messages, *, display: bool = True, guard: bool = False
+) -> tuple[BaseMessage | None, bool, bool]:
+    """Invoke the model with streaming; optionally display and/or guard.
+
+    Returns ``(response, streamed_text, aborted)``. Chunks are aggregated
+    with ``+`` so the final message carries merged tool_calls/usage exactly
+    like invoke. Falls back to a normal retry-invoke when the provider can't
+    stream. Checks the cancel flag between chunks so Escape lands mid-answer.
+
+    ``guard=True`` watches a rolling tail buffer for verbatim self-repetition
+    and closes the stream the moment it appears — the server stops generating,
+    so a doomed reply costs seconds instead of the token limit. The partial
+    message is returned with ``aborted=True``; the caller decides what to do
+    with it.
+
+    Display chunks go through the CONTROL event bus (``llm_chunk``/
+    ``llm_done``) when a listener is registered — the TUI renders them live.
+    Without a listener (plain CLI), they fall back to stdout.
     """
     import sys as _sys
 
     try:
         full = None
         emitted = False
+        aborted = False
+        _buf = ""
         for chunk in llm.stream(messages):
             full = chunk if full is None else full + chunk
             if CONTROL.cancelled():
@@ -2130,7 +2200,12 @@ def _stream_invoke(llm, messages) -> tuple[BaseMessage | None, bool]:
                 content = "".join(
                     b.get("text", "") for b in content if isinstance(b, dict)
                 )
-            if content:
+            if guard and content:
+                _buf = (_buf + content)[-(_REP_MAX_UNIT * _REP_MIN_REPEATS):]
+                if _tail_repetition(_buf):
+                    aborted = True
+                    break
+            if display and content:
                 if not CONTROL.emit("llm_chunk", content):
                     if not emitted:
                         _sys.stdout.write("\n")
@@ -2142,14 +2217,14 @@ def _stream_invoke(llm, messages) -> tuple[BaseMessage | None, bool]:
             _sys.stdout.flush()
         if full is None:
             if CONTROL.cancelled():
-                return None, False
-            return _invoke_cancelable(llm, messages), False
-        return full, emitted
+                return None, False, False
+            return _invoke_cancelable(llm, messages), False, False
+        return full, emitted, aborted
     except Exception:
         if CONTROL.cancelled():
-            return None, False
+            return None, False, False
         # Provider/transport can't stream — degrade to the retry path.
-        return _invoke_cancelable(llm, messages), False
+        return _invoke_cancelable(llm, messages), False, False
 
 
 def _try_bind_tools(llm, toolset: list[tools.ToolDef]):
