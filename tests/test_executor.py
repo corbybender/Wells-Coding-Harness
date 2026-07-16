@@ -154,6 +154,33 @@ def test_system_prompt_compact_is_meaningfully_smaller(tmp_path: Path):
     assert estimate_tokens(compact) < estimate_tokens(full) * 0.75
 
 
+def test_compact_prompt_includes_matching_few_shot_examples(tmp_path: Path):
+    """Compact mode targets small models — they get two worked tool-call
+    examples in whichever format the run expects; full mode skips them."""
+    from wells import tools as _tools
+
+    compact_text = executor._system_prompt(
+        "t", _tools.ALL_TOOLS, plan_mode=False, workspace=str(tmp_path),
+        compact=True, structured=False,
+    )
+    assert "EXAMPLES — copy this format exactly" in compact_text
+    assert '<tool_call>{"name": "read_file"' in compact_text
+
+    compact_structured = executor._system_prompt(
+        "t", _tools.ALL_TOOLS, plan_mode=False, workspace=str(tmp_path),
+        compact=True, structured=True,
+    )
+    assert "EXAMPLES — copy this format exactly" in compact_structured
+    # Structured examples must show the bare-JSON form, not the tag.
+    assert "<tool_call>" not in compact_structured.split("EXAMPLES")[1]
+
+    full_text = executor._system_prompt(
+        "t", _tools.ALL_TOOLS, plan_mode=False, workspace=str(tmp_path),
+        compact=False,
+    )
+    assert "EXAMPLES — copy this format exactly" not in full_text
+
+
 def test_run_executor_auto_detects_local_ollama_and_uses_compact_prompt(
     ctx: tools.ToolContext,
 ):

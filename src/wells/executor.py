@@ -283,6 +283,31 @@ def _system_prompt(task: str, toolset: list[tools.ToolDef], *, plan_mode: bool,
         if structured
         else ""
     )
+    # Small models follow a concrete demonstration far more reliably than an
+    # abstract format description — two short worked examples cost ~100 tokens
+    # and measurably cut protocol violations, so compact mode (which exists
+    # for exactly those models) includes them even while trimming everything
+    # else. Shaped to whichever format this run actually expects.
+    examples_note = ""
+    if compact:
+        if structured:
+            examples_note = (
+                "\n\nEXAMPLES — copy this format exactly:\n"
+                "To inspect a file, reply with exactly:\n"
+                '{"name": "read_file", "args": {"path": "src/app.py"}}\n'
+                "To create or overwrite a file, reply with exactly:\n"
+                '{"name": "write_file", "args": {"path": "hello.py", '
+                '"content": "print(\'hi\')\\n"}}\n'
+            )
+        else:
+            examples_note = (
+                "\n\nEXAMPLES — copy this format exactly:\n"
+                "To inspect a file, emit:\n"
+                '<tool_call>{"name": "read_file", "args": {"path": "src/app.py"}}</tool_call>\n'
+                "To create or overwrite a file, emit:\n"
+                '<tool_call>{"name": "write_file", "args": {"path": "hello.py", '
+                '"content": "print(\'hi\')\\n"}}</tool_call>\n'
+            )
     base = f"""You are an autonomous software engineering agent working inside a real code repository.
 You operate by calling tools to read files, search code, make edits, and run commands/tests,
 then observing the results, until the task is complete.
@@ -334,7 +359,7 @@ TOOL CALLING — MANDATORY:
   into every subprocess. Do NOT prepend $env:REQUESTS_CA_BUNDLE=... yourself — it's already
   set. If a command fails with an SSL/cert error, report it rather than retrying manually.
 - If the same operation has failed 3+ times with similar errors, STOP and report what is
-  blocking you rather than continuing to retry.{structured_note}
+  blocking you rather than continuing to retry.{structured_note}{examples_note}
 """
     # Principles always first (the constitution), then the skills index (so the
     # model knows which load_skill calls are available, without paying for the
