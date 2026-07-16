@@ -286,6 +286,13 @@ WELLS_SKILLS: bool = os.getenv("WELLS_SKILLS", "1") not in ("0", "false", "no", 
 # CodeAct: a sandboxed run_code tool for in-context computation. Default on.
 WELLS_CODEACT: bool = os.getenv("WELLS_CODEACT", "1") not in ("0", "false", "no", "")
 
+# When one model reply contains several tool calls, run the leading run of
+# read-only calls (read_file, grep, glob, ...) concurrently instead of one by
+# one. Results land in the transcript in call order; mutating calls and
+# everything after the first one stay strictly sequential, so ordering
+# semantics are unchanged. Set 0 to disable.
+PARALLEL_READS: bool = os.getenv("WELLS_PARALLEL_READS", "1") not in ("0", "false", "no", "")
+
 # Structured outputs: for local Ollama profiles, constrain the model's reply
 # to a tool-call JSON schema at the token-sampling level (Ollama "format" /
 # OpenAI-compat "response_format: json_schema"). The sampler literally cannot

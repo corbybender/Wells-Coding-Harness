@@ -403,6 +403,58 @@ def test_structured_outputs_disabled_by_config(ctx: tools.ToolContext):
 
 
 # ---------------------------------------------------------------------------
+# Parallel read-only tool dispatch
+# ---------------------------------------------------------------------------
+
+
+def test_batched_readonly_calls_all_execute_in_order(
+    ctx: tools.ToolContext, workspace: Path
+):
+    LEDGER.reset()
+    (workspace / "other.py").write_text("y = 2\n")
+    batch = (
+        '<tool_call>{"name": "read_file", "args": {"path": "maths.py"}}</tool_call>\n'
+        '<tool_call>{"name": "read_file", "args": {"path": "other.py"}}</tool_call>\n'
+        '<tool_call>{"name": "list_dir", "args": {"path": "."}}</tool_call>'
+    )
+    with (
+        patch.object(config, "_invoke_with_retry",
+                     side_effect=_scripted([AIMessage(content=batch), AIMessage(content="done")])),
+        patch.object(config, "STRUCTURED_OUTPUTS", False),
+        patch.object(executor, "_try_bind_tools", return_value=None),
+    ):
+        result = executor.run_executor(task="x", ctx=ctx, max_steps=10, step_label="t")
+    assert [c["name"] for c in result.tool_calls[:3]] == ["read_file", "read_file", "list_dir"]
+    assert all(c["ok"] for c in result.tool_calls[:3])
+    tool_msgs = [m for m in result.messages if isinstance(m, ToolMessage)]
+    assert "return a - b" in tool_msgs[0].content  # maths.py content, in order
+    assert "y = 2" in tool_msgs[1].content
+
+
+def test_read_after_write_in_same_batch_sees_fresh_content(
+    ctx: tools.ToolContext, workspace: Path
+):
+    """A read-only call AFTER a mutating call in the same batch must not be
+    prefetched — it has to observe the write's effect, not stale state."""
+    LEDGER.reset()
+    batch = (
+        '<tool_call>{"name": "write_file", "args": {"path": "fresh.txt", "content": "brand new"}}</tool_call>\n'
+        '<tool_call>{"name": "read_file", "args": {"path": "fresh.txt"}}</tool_call>'
+    )
+    with (
+        patch.object(config, "_invoke_with_retry",
+                     side_effect=_scripted([AIMessage(content=batch), AIMessage(content="done")])),
+        patch.object(config, "STRUCTURED_OUTPUTS", False),
+        patch.object(executor, "_try_bind_tools", return_value=None),
+    ):
+        result = executor.run_executor(task="x", ctx=ctx, max_steps=10, step_label="t")
+    read_calls = [c for c in result.tool_calls if c["name"] == "read_file"]
+    assert read_calls and read_calls[0]["ok"]
+    tool_msgs = [m for m in result.messages if isinstance(m, ToolMessage)]
+    assert any("brand new" in (m.content or "") for m in tool_msgs)
+
+
+# ---------------------------------------------------------------------------
 # Model cascade / escalation on failure
 # ---------------------------------------------------------------------------
 

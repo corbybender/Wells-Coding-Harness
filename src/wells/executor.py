@@ -1593,7 +1593,44 @@ def run_executor(
                 streamed=streamed_this_round and bool(llm_text),
             )
 
-        for call in calls:
+        # ── Parallel prefetch: leading run of read-only calls ────────────────
+        # Only the batch's *prefix* of read-only calls is eligible: a mutating
+        # call changes what any later read in the same batch would see, so
+        # everything from the first non-read-only call onward stays strictly
+        # sequential. Rules must clear a call before it runs — anything the
+        # engine would block or gate behind confirmation is left to the
+        # sequential path, which never executes it early.
+        _prefetched: dict[int, tools.ToolResult] = {}
+        if config.PARALLEL_READS and len(calls) > 1:
+            _ro_names = {t.name for t in toolset if not t.mutating}
+            _par_idx: list[int] = []
+            for _i, _c in enumerate(calls):
+                _cname = _c.get("name")
+                if not _cname or _cname not in _ro_names:
+                    break
+                if rules_engine is not None:
+                    _d = rules_engine.check(_cname, _c.get("args") or {})
+                    if not _d.allow or _d.confirm:
+                        break
+                _par_idx.append(_i)
+            if len(_par_idx) > 1:
+                from concurrent.futures import ThreadPoolExecutor as _TPE
+                with _TPE(max_workers=min(4, len(_par_idx)),
+                          thread_name_prefix="wells-par-read") as _pool:
+                    _futs = {
+                        _i: _pool.submit(
+                            tools.dispatch, calls[_i]["name"],
+                            calls[_i].get("args") or {}, ctx,
+                        )
+                        for _i in _par_idx
+                    }
+                    for _i, _fut in _futs.items():
+                        try:
+                            _prefetched[_i] = _fut.result()
+                        except Exception:
+                            pass  # sequential dispatch below is the fallback
+
+        for _call_idx, call in enumerate(calls):
             if CONTROL.cancelled():
                 return _stopped("cancelled", "(cancelled by user)")
             steps += 1
@@ -1682,7 +1719,9 @@ def run_executor(
 
             _act(f"{name} · step {steps}/{cap_s}")
             CONTROL.set_progress(step_label, steps, cap)
-            result = tools.dispatch(name, args, ctx)
+            result = _prefetched.pop(_call_idx, None)
+            if result is None:
+                result = tools.dispatch(name, args, ctx)
             # dispatch() can block for a while (a shell command, a subagent);
             # check again right after it returns instead of waiting for the
             # top of the next round — a cancel that landed mid-command should
