@@ -123,6 +123,15 @@ LLM_BACKOFF_BASE: float = float(os.getenv("LLM_BACKOFF_BASE", "2.0"))
 # session rather than inline on a single task's critical path.
 OLLAMA_NUM_CTX: int = int(os.getenv("OLLAMA_NUM_CTX", "0"))
 
+# Keep the local Ollama model loaded in memory between requests. Ollama's
+# server default unloads an idle model after ~5 minutes; the next request then
+# silently re-pays the load (measured live: ~294s for a 7B model reloading at
+# a larger context size, multi-second even at defaults). "-1" = keep loaded
+# forever; any Ollama duration string ("30m") also works; empty disables.
+# Piggybacks on the same native warm-up call as OLLAMA_NUM_CTX, so it costs
+# nothing extra — a keep_alive ping against a loaded model is milliseconds.
+OLLAMA_KEEP_ALIVE: str = os.getenv("OLLAMA_KEEP_ALIVE", "-1").strip()
+
 # --- Token optimization configuration -------------------------------------
 # These are the enforced context-trim ceiling for the executor's safety-drop
 # pipeline (executor._effective_ctx_budget), not just informational — a

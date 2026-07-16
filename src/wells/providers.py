@@ -183,44 +183,6 @@ def load_profile(name: str) -> ProviderProfile | None:
         base_url=base_url,
         extra=extra,
     )
-    model = _env(f"MODEL_{name}", f"PROFILE_{name}_MODEL")
-    base_url = _env(
-        f"BASE_URL_{name}",
-        f"PROFILE_{name}_BASE_URL",
-        default=defaults.get("base_url", ""),
-    )
-
-    # Legacy ZAI_* compatibility: seed the `zai` profile from the old vars.
-    if name == "zai" and not model:
-        model = _env("ZAI_MODEL", default="glm-5.2")
-    if name == "zai" and not base_url:
-        base_url = _env("ZAI_ENDPOINT")
-    api_key = _resolve_api_key(name)
-    if name == "zai" and not api_key:
-        api_key = _env("ZAI_API_KEY")
-
-    extra_raw = _env(f"EXTRA_{name}", f"PROFILE_{name}_EXTRA")
-    extra: dict[str, Any] = {}
-    if extra_raw:
-        try:
-            extra = json.loads(extra_raw)
-            if not isinstance(extra, dict):
-                extra = {}
-        except Exception:
-            extra = {}
-
-    if not model and not extra:
-        # A profile with no model and no extras is "not configured".
-        return None
-
-    return ProviderProfile(
-        name=name,
-        kind=kind,
-        model=model,
-        api_key=api_key,
-        base_url=base_url,
-        extra=extra,
-    )
 
 
 def available_profiles() -> list[str]:
@@ -253,10 +215,12 @@ def _looks_like_local_ollama(profile: ProviderProfile) -> bool:
     return ":11434" in (profile.base_url or "")
 
 
-def warm_ollama_context(profile: ProviderProfile, *, num_ctx: int) -> None:
+def warm_ollama_context(
+    profile: ProviderProfile, *, num_ctx: int, keep_alive: str = ""
+) -> None:
     """Best-effort: ask Ollama to (re)load ``profile.model`` with a larger
     context window than its server-side default (commonly 4096, regardless
-    of what the model architecturally supports).
+    of what the model architecturally supports) and/or pin it in memory.
 
     Only Ollama's *native* API (``/api/chat`` with ``options.num_ctx``)
     honors a per-request context override and reloads the running model at
@@ -267,11 +231,20 @@ def warm_ollama_context(profile: ProviderProfile, *, num_ctx: int) -> None:
     for every subsequent request against that model, regardless of which
     endpoint carries the actual conversation.
 
+    ``keep_alive`` (Ollama duration string or "-1" for forever) rides along
+    on the same warm-up call. Ollama's server default unloads an idle model
+    after ~5 minutes — a context-size reload was measured at ~294s live
+    against a real 7B model on Apple Silicon, so letting the model unload
+    between tasks silently re-pays a multi-minute (or at best multi-second)
+    load on the next run. Pinning costs nothing extra: the warm-up request
+    happens anyway, and a keep_alive-only ping against an already-loaded
+    model returns in milliseconds.
+
     Never raises: a local dev server being briefly unreachable, slow, or
     running a version that doesn't support this must not break the run —
-    worst case, the model stays at whatever context it already had.
+    worst case, the model stays at whatever context/keep-alive it already had.
     """
-    if num_ctx <= 0 or not _looks_like_local_ollama(profile):
+    if (num_ctx <= 0 and not keep_alive) or not _looks_like_local_ollama(profile):
         return
     key = (profile.base_url, profile.model)
     if key in _OLLAMA_WARMED:
@@ -279,25 +252,31 @@ def warm_ollama_context(profile: ProviderProfile, *, num_ctx: int) -> None:
     root = (profile.base_url or "http://127.0.0.1:11434").rstrip("/")
     if root.endswith("/v1"):
         root = root[: -len("/v1")]
+    payload: dict[str, Any] = {
+        "model": profile.model,
+        "messages": [{"role": "user", "content": ""}],
+        "stream": False,
+    }
+    if num_ctx > 0:
+        payload["options"] = {"num_ctx": num_ctx}
+    if keep_alive:
+        # Ollama accepts a number (seconds; -1 = keep loaded forever) or a
+        # duration string ("30m"). Pass numerics as real numbers so "-1"
+        # means forever rather than the (invalid) string "-1".
+        try:
+            payload["keep_alive"] = int(keep_alive)
+        except ValueError:
+            payload["keep_alive"] = keep_alive
     try:
         import httpx
-        # A context-size reload measured ~294s live against a real 7B model
-        # on Apple Silicon — a short timeout here would silently "fail" on
-        # every single call (never actually completing the reload it exists
-        # to trigger) while still paying most of the wait. Generous margin
-        # over the measured cost; this only runs when a caller has opted in
-        # (OLLAMA_NUM_CTX > 0), so a long worst-case wait is expected, not
-        # a surprise.
-        httpx.post(
-            f"{root}/api/chat",
-            json={
-                "model": profile.model,
-                "messages": [{"role": "user", "content": ""}],
-                "stream": False,
-                "options": {"num_ctx": num_ctx},
-            },
-            timeout=600.0,
-        )
+        # A context-size reload measured ~294s live — a short timeout here
+        # would silently "fail" on every single call (never actually
+        # completing the reload it exists to trigger) while still paying
+        # most of the wait. Generous margin over the measured cost. A
+        # keep_alive-only ping (num_ctx unset) rides the same generous
+        # timeout: worst case it's the model's first load of the session,
+        # which was going to happen on the first real request anyway.
+        httpx.post(f"{root}/api/chat", json=payload, timeout=600.0)
     except Exception:
         return
     _OLLAMA_WARMED.add(key)
@@ -310,7 +289,11 @@ def _build_chat_model(profile: ProviderProfile, *, temperature: float, timeout: 
     is requested but not installed.
     """
     from wells import config as _config
-    warm_ollama_context(profile, num_ctx=_config.OLLAMA_NUM_CTX)
+    warm_ollama_context(
+        profile,
+        num_ctx=_config.OLLAMA_NUM_CTX,
+        keep_alive=_config.OLLAMA_KEEP_ALIVE,
+    )
 
     kind = profile.kind
     if kind not in _KIND_TABLE:

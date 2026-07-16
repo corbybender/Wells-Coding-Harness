@@ -231,6 +231,67 @@ def test_warm_ollama_context_only_fires_once_per_endpoint_and_model(monkeypatch)
     assert len(calls) == 1
 
 
+def test_warm_ollama_keep_alive_rides_along_with_num_ctx(monkeypatch):
+    providers._OLLAMA_WARMED.clear()
+    calls = []
+
+    class FakeHttpx:
+        @staticmethod
+        def post(url, json, timeout):
+            calls.append((url, json))
+
+    monkeypatch.setitem(__import__("sys").modules, "httpx", FakeHttpx)
+    prof = providers.ProviderProfile(
+        name="x", kind="ollama", model="qwen2.5-coder:7b",
+        base_url="http://127.0.0.1:11434",
+    )
+    providers.warm_ollama_context(prof, num_ctx=16384, keep_alive="-1")
+    assert len(calls) == 1
+    _, payload = calls[0]
+    assert payload["options"]["num_ctx"] == 16384
+    # "-1" must go over the wire as the number -1 (forever), not a string.
+    assert payload["keep_alive"] == -1
+
+
+def test_warm_ollama_keep_alive_alone_fires_without_num_ctx(monkeypatch):
+    """Pinning the model in memory must not require opting into the (slow,
+    context-reloading) num_ctx warm-up — keep_alive alone justifies the ping."""
+    providers._OLLAMA_WARMED.clear()
+    calls = []
+
+    class FakeHttpx:
+        @staticmethod
+        def post(url, json, timeout):
+            calls.append((url, json))
+
+    monkeypatch.setitem(__import__("sys").modules, "httpx", FakeHttpx)
+    prof = providers.ProviderProfile(
+        name="x", kind="ollama", model="m", base_url="http://127.0.0.1:11434"
+    )
+    providers.warm_ollama_context(prof, num_ctx=0, keep_alive="30m")
+    assert len(calls) == 1
+    _, payload = calls[0]
+    assert payload["keep_alive"] == "30m"  # duration string passes through
+    assert "options" not in payload  # no num_ctx -> no context reload request
+
+
+def test_warm_ollama_skipped_when_both_num_ctx_and_keep_alive_off(monkeypatch):
+    providers._OLLAMA_WARMED.clear()
+    calls = []
+
+    class FakeHttpx:
+        @staticmethod
+        def post(url, json, timeout):
+            calls.append(url)
+
+    monkeypatch.setitem(__import__("sys").modules, "httpx", FakeHttpx)
+    prof = providers.ProviderProfile(
+        name="x", kind="ollama", model="m", base_url="http://127.0.0.1:11434"
+    )
+    providers.warm_ollama_context(prof, num_ctx=0, keep_alive="")
+    assert calls == []
+
+
 def test_warm_ollama_context_never_raises_on_network_failure(monkeypatch):
     """A local dev server being briefly unreachable must never break the run."""
     providers._OLLAMA_WARMED.clear()
