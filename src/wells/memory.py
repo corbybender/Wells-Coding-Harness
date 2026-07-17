@@ -56,27 +56,91 @@ class Memory:
 # ---------------------------------------------------------------------------
 
 
-def load(workspace: str | None = None) -> Memory:
-    """Read AGENTS.md from the workspace root (empty Memory if absent).
+_NESTED_SKIP_DIRS = {
+    ".git", "__pycache__", ".venv", "venv", "node_modules", "target", "dist",
+    "build", ".wells_index", ".idea", ".vscode", ".pytest_cache", ".mypy_cache",
+    ".agents",
+}
+_MAX_NESTED_FILES = 12  # bound the walk on pathological repos
 
-    Tolerant of encoding mismatches: tries UTF-8 first, then the locale default,
-    then a lossy UTF-8-with-replacement decode — so a non-UTF-8 file (e.g. written
-    by a Windows tool in cp1252) still loads rather than silently disappearing.
+
+def _read_text(path: Path) -> str:
+    """Read ``path`` as text, tolerant of encoding mismatches (empty on any failure).
+
+    Tries UTF-8 first, then the locale default, then a lossy UTF-8-with-
+    replacement decode — so a non-UTF-8 file (e.g. written by a Windows tool
+    in cp1252) still loads rather than silently disappearing.
+    """
+    try:
+        raw = path.read_bytes()
+    except Exception:
+        return ""
+    return _decode_lenient(raw)
+
+
+def _discover_nested(root: Path) -> list[Path]:
+    """Find AGENTS.md files in subdirectories (monorepo per-package conventions).
+
+    Excludes the root's own AGENTS.md (handled separately) and common
+    non-source directories. Ordered shallowest-first, then alphabetically, so
+    merge order is stable and predictable across runs. Capped at
+    _MAX_NESTED_FILES — a repo with more than that has bigger problems than
+    an incomplete memory merge.
+    """
+    found: list[Path] = []
+    stack = [root]
+    while stack:
+        d = stack.pop()
+        try:
+            entries = sorted(d.iterdir(), key=lambda p: p.name.lower())
+        except Exception:
+            continue
+        for e in entries:
+            if e.is_dir():
+                if e.name not in _NESTED_SKIP_DIRS and not e.name.startswith("."):
+                    stack.append(e)
+            elif e.name == AGENTS_FILE and e != root / AGENTS_FILE:
+                found.append(e)
+    found.sort(key=lambda p: (len(p.relative_to(root).parts), str(p).lower()))
+    return found[:_MAX_NESTED_FILES]
+
+
+def load(workspace: str | None = None) -> Memory:
+    """Read AGENTS.md from the workspace root, merged with any nested
+    per-package AGENTS.md files found in subdirectories (empty Memory if none
+    exist).
+
+    Monorepo support: ``packages/api/AGENTS.md`` and ``packages/web/AGENTS.md``
+    each carry package-specific conventions layered on top of the root's
+    general ones — closer-to-root content first, nested content after and
+    labeled with its directory, so a model reads general rules before more
+    specific ones. ``Memory.path`` always points at the root file — nested
+    files are merge inputs only; :func:`append_lesson` still writes lessons
+    back to the root file exclusively (writing to an arbitrary nested file
+    based on which one a run happened to touch would be surprising).
     """
     try:
         root = safety.workspace_root(workspace)
     except Exception:
         return Memory(text="", path=None, exists=False)
-    path = root / AGENTS_FILE
-    if not path.exists():
-        return Memory(text="", path=path, exists=False)
-    raw = b""
+    root_path = root / AGENTS_FILE
+    parts: list[str] = []
+    root_text = _read_text(root_path) if root_path.exists() else ""
+    if root_text.strip():
+        parts.append(root_text.strip())
     try:
-        raw = path.read_bytes()
+        for nested_path in _discover_nested(root):
+            nested_text = _read_text(nested_path)
+            if nested_text.strip():
+                rel_dir = nested_path.parent.relative_to(root).as_posix()
+                parts.append(
+                    f"### {rel_dir}/AGENTS.md (package-specific conventions)\n"
+                    f"{nested_text.strip()}"
+                )
     except Exception:
-        return Memory(text="", path=path, exists=False)
-    text = _decode_lenient(raw)
-    return Memory(text=text, path=path, exists=True)
+        pass  # nested discovery is best-effort; root memory still loads
+    combined = "\n\n---\n\n".join(parts)
+    return Memory(text=combined, path=root_path, exists=bool(combined.strip()))
 
 
 def _decode_lenient(raw: bytes) -> str:
