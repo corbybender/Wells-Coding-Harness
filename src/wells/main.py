@@ -8,10 +8,15 @@ Usage:
     wells --plan "<goal>"                  # plan mode (no edits)
     wells --version                        # show version
     wells "<goal>" MAX_ITERATIONS=5        # inline setting overrides
+
+    # Headless / scriptable (CI, wrapping Wells from other tooling):
+    wells -p --output-format json "<goal>"      # one JSON object on stdout, exit 0/1
+    echo "<goal>" | wells -p --output-format json  # task piped in via stdin
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time as _time
@@ -154,34 +159,56 @@ def _print_info() -> None:
     print(bar)
 
 
-def _run_goal(goal: str, *, resume_context: str | None = None) -> None:
-    """Build and invoke the harness graph for ``goal``."""
+def _run_goal(
+    goal: str, *, resume_context: str | None = None, output_format: str = "text"
+) -> None:
+    """Build and invoke the harness graph for ``goal``.
+
+    ``output_format="json"`` is the headless/scriptable path (``wells -p
+    --output-format json "task"``, CI pipelines, wrapping Wells from other
+    tooling): every progress/debug print the graph and its agents scatter
+    across stdout is redirected to stderr for the duration of the run, then
+    exactly one JSON object describing the outcome is written to stdout.
+    Exit code reflects success (0) vs incomplete/error (1) so a CI step can
+    branch on it without scraping text.
+    """
+    import contextlib
+    import io
+
     from wells.graph import build_graph
     from wells.sessions import new_session_id, save_session, session_from_final_state
     from wells.tokens import LEDGER
 
+    json_mode = output_format == "json"
+
     if not _ensure_model_configured():
+        if json_mode:
+            print(json.dumps({"status": "error", "error": "model not configured"}))
         sys.exit(1)
 
     LEDGER.reset()
     session_id = new_session_id()
     t0 = _time.time()
 
-    print(f"Model: {config.model_name_for_task('coding')}")
-    print(f"Workspace: {config.WORKSPACE_ROOT}  (safety: {config.HARNESS_SAFETY})")
+    def _say(line: str) -> None:
+        if not json_mode:
+            print(line)
+
+    _say(f"Model: {config.model_name_for_task('coding')}")
+    _say(f"Workspace: {config.WORKSPACE_ROOT}  (safety: {config.HARNESS_SAFETY})")
     if config.WORKSPACE_ROOT_INVALID:
-        print(
+        _say(
             f"WARNING: configured WORKSPACE_ROOT does not exist: "
             f"{config.WORKSPACE_ROOT_INVALID} — falling back to the directory "
             f"above. Fix WORKSPACE_ROOT in .env (or pass --workspace)."
         )
     if config.PLAN_MODE:
-        print("Plan mode: ON (coder will plan edits without applying them)")
-    print(f"Max coder<->reviewer iterations: {config.MAX_ITERATIONS}")
-    print(f"Goal: {goal}")
+        _say("Plan mode: ON (coder will plan edits without applying them)")
+    _say(f"Max coder<->reviewer iterations: {config.MAX_ITERATIONS}")
+    _say(f"Goal: {goal}")
     if resume_context:
-        print("[Continuing from previous session — context injected]")
-    print("-" * 70)
+        _say("[Continuing from previous session — context injected]")
+    _say("-" * 70)
 
     app = build_graph()
     effective_goal = f"{resume_context}\n\nCONTINUED GOAL:\n{goal}" if resume_context else goal
@@ -195,21 +222,56 @@ def _run_goal(goal: str, *, resume_context: str | None = None) -> None:
         "messages": [],
     }
 
-    final_state = app.invoke(initial_state)
+    # Every agent/graph node prints its own progress chatter directly to
+    # stdout (print("[coder] ...") etc.) — there is no single choke point to
+    # silence instead. Redirecting the whole stream to stderr for the
+    # invoke's duration keeps stdout pure JSON without touching every call
+    # site; nothing here reads stdin, so it's a safe blanket swap.
+    stdout_guard = (
+        contextlib.redirect_stdout(sys.stderr) if json_mode else contextlib.nullcontext()
+    )
+    with stdout_guard:
+        final_state = app.invoke(initial_state)
     duration = int(_time.time() - t0)
-    _print_final_summary(final_state)
 
-    # Token report: one-line summary; full table only when WELLS_TOKEN_REPORT=1.
     t = LEDGER.totals()
     total = t["input"] + t["output"]
-    print(
-        f"\n[tokens] {total:,} total "
-        f"({t['input']:,} in / {t['output']:,} out) across {t['calls']} calls"
-        + (f", {t['cache_read']:,} cache hits" if t["cache_read"] else "")
-        + (" — set WELLS_TOKEN_REPORT=1 for full breakdown" if total > 50_000 else "")
-    )
-    if os.environ.get("WELLS_TOKEN_REPORT") == "1":
-        print("\n" + LEDGER.format_report())
+
+    if json_mode:
+        from wells import pricing
+        payload = {
+            "status": (
+                "error" if final_state.get("review_error")
+                else "complete" if final_state.get("review_complete")
+                else "incomplete"
+            ),
+            "goal": goal,
+            "session_id": session_id,
+            "workspace": config.WORKSPACE_ROOT,
+            "iterations": final_state.get("iteration", 0),
+            "max_iterations": final_state.get("max_iterations", config.MAX_ITERATIONS),
+            "summary": (final_state.get("implementation_steps") or "").strip(),
+            "review_result": (final_state.get("review_result") or "").strip(),
+            "git_summary": final_state.get("git_summary", ""),
+            "tokens": {
+                "input": t["input"], "output": t["output"], "total": total,
+                "calls": t["calls"], "cache_read": t["cache_read"],
+            },
+            "cost_usd": pricing.run_cost(),
+            "duration_seconds": duration,
+        }
+        exit_code = 0 if payload["status"] == "complete" else 1
+    else:
+        _print_final_summary(final_state)
+        print(
+            f"\n[tokens] {total:,} total "
+            f"({t['input']:,} in / {t['output']:,} out) across {t['calls']} calls"
+            + (f", {t['cache_read']:,} cache hits" if t["cache_read"] else "")
+            + (" — set WELLS_TOKEN_REPORT=1 for full breakdown" if total > 50_000 else "")
+        )
+        if os.environ.get("WELLS_TOKEN_REPORT") == "1":
+            print("\n" + LEDGER.format_report())
+        exit_code = None
 
     # Persist session for later resume/history.
     try:
@@ -222,9 +284,13 @@ def _run_goal(goal: str, *, resume_context: str | None = None) -> None:
             resumed_from=resume_context[:80] if resume_context else None,
         )
         save_session(session_id, data)
-        print(f"[session: {session_id}]")
+        _say(f"[session: {session_id}]")
     except Exception as e:
-        print(f"[session save failed: {e}]")
+        _say(f"[session save failed: {e}]")
+
+    if json_mode:
+        print(json.dumps(payload, ensure_ascii=False, default=str))
+        sys.exit(exit_code)
 
 
 def _ensure_model_configured_fast() -> bool:
@@ -483,6 +549,11 @@ def _print_usage() -> None:
         "  -s, --safety MODE      auto | approve | dryrun\n"
         "  -r, --resume [SID]     resume a previous session (interactive or by ID)\n"
         "      --plan             plan mode (describe edits, don't apply)\n"
+        "  -p, --print            headless one-shot; with no goal arg, reads the\n"
+        "                         task from stdin instead of launching the REPL\n"
+        "      --output-format F  text (default) | json — json implies --print;\n"
+        "                         exit code 0 on COMPLETE, 1 otherwise\n"
+        "      --json             shorthand for --output-format json\n"
         "      --version          show version and exit\n"
         "  -h, --help             show this help\n"
         "\nSubcommands:\n"
@@ -581,12 +652,27 @@ def main() -> None:
     workspace_override: str | None = None
     safety_override: str | None = None
     plan_flag = False
+    print_flag = False   # -p/--print: headless one-shot (already the default for a goal arg)
+    output_format = "text"
     resume_flag: str | None = None  # None = no resume; "" = interactive; "ID" = specific
     remaining: list[str] = []
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a in ("-w", "--workspace"):
+        if a in ("-p", "--print"):
+            print_flag = True
+        elif a == "--output-format":
+            i += 1
+            if i < len(argv):
+                output_format = argv[i]
+            else:
+                print("ERROR: --output-format requires a value (text|json)")
+                sys.exit(2)
+        elif a.startswith("--output-format="):
+            output_format = a.split("=", 1)[1]
+        elif a == "--json":
+            output_format = "json"
+        elif a in ("-w", "--workspace"):
             i += 1
             if i < len(argv):
                 workspace_override = argv[i]
@@ -635,6 +721,12 @@ def main() -> None:
     if workspace_override or safety_override or plan_flag:
         _reload_module_config()
 
+    if output_format not in ("text", "json"):
+        print(f"ERROR: --output-format must be 'text' or 'json', got {output_format!r}")
+        sys.exit(2)
+    if output_format == "json":
+        print_flag = True  # JSON output only makes sense for a one-shot headless run
+
     # ---- Pass 2: subcommand detection on what's left ----
     if remaining and remaining[0] in ("-h", "--help", "help"):
         _print_usage()
@@ -677,6 +769,19 @@ def main() -> None:
         settings.parse_argv_settings(overrides)
         _reload_module_config()
 
+    if not goal_args and print_flag and resume_flag is None:
+        # -p/--print (or --output-format json) with no goal argument: read the
+        # task from stdin, the standard scripting convention (echo "task" |
+        # wells -p --output-format json). Ambiguous/empty stdin is a hard
+        # error rather than silently falling through to the interactive REPL,
+        # which would hang a CI job waiting on a TTY that will never answer.
+        piped = sys.stdin.read().strip() if not sys.stdin.isatty() else ""
+        if not piped:
+            print("ERROR: -p/--print with no goal argument requires a task on stdin.")
+            sys.exit(2)
+        _run_goal(piped, output_format=output_format)
+        return
+
     if not goal_args and resume_flag is None:
         # No goal and no resume flag — launch the interactive REPL.
         # Start the file-system watcher before entering the TUI so the index
@@ -700,7 +805,7 @@ def main() -> None:
         goal, resume_ctx = _handle_resume_flag(resume_flag, goal_args)
         if goal:
             # User supplied a new goal on the CLI: run it once with context.
-            _run_goal(goal, resume_context=resume_ctx)
+            _run_goal(goal, resume_context=resume_ctx, output_format=output_format)
         else:
             # No new goal: enter the TUI with the session context preloaded.
             from wells.cli import run_repl
@@ -708,7 +813,7 @@ def main() -> None:
         return
 
     goal = " ".join(goal_args).strip()
-    _run_goal(goal)
+    _run_goal(goal, output_format=output_format)
 
 
 def _looks_like_override(arg: str) -> bool:
