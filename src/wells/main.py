@@ -74,7 +74,11 @@ def _print_final_summary(state: dict) -> None:
         # so don't report it as if the reviewer judged the work and disagreed.
         status = "ERROR (reviewer could not run — see notes below, check API key/connectivity)"
     else:
-        status = "COMPLETE" if complete else f"INCOMPLETE (stopped after {iterations}/{max_iter} iterations)"
+        status = (
+            "COMPLETE"
+            if complete
+            else f"INCOMPLETE (stopped after {iterations}/{max_iter} iterations)"
+        )
 
     bar = "=" * 70
     print(f"\n{bar}")
@@ -160,14 +164,20 @@ def _print_info() -> None:
     # Show the active principles source so users know which AGENT.md is in effect.
     try:
         from wells import principles
-        print(f"  Principles         : {principles.source_label(config.WORKSPACE_ROOT)}")
+
+        print(
+            f"  Principles         : {principles.source_label(config.WORKSPACE_ROOT)}"
+        )
     except Exception:
         pass
     print(bar)
 
 
 def _run_goal(
-    goal: str, *, resume_context: str | None = None, output_format: str = "text",
+    goal: str,
+    *,
+    resume_context: str | None = None,
+    output_format: str = "text",
     image_paths: list[str] | None = None,
 ) -> None:
     """Build and invoke the harness graph for ``goal``.
@@ -203,16 +213,24 @@ def _run_goal(
             print(line)
 
     from wells import hooks
-    hook_allowed, hook_reason = hooks.fire_user_prompt_submit(config.WORKSPACE_ROOT, goal)
+
+    hook_allowed, hook_reason = hooks.fire_user_prompt_submit(
+        config.WORKSPACE_ROOT, goal
+    )
     if not hook_allowed:
         if json_mode:
-            print(json.dumps({"status": "error", "error": f"blocked by hook: {hook_reason}"}))
+            print(
+                json.dumps(
+                    {"status": "error", "error": f"blocked by hook: {hook_reason}"}
+                )
+            )
         else:
             print(f"BLOCKED by UserPromptSubmit hook: {hook_reason}")
         sys.exit(1)
 
     if image_paths:
         from wells import vision
+
         try:
             for p in image_paths:
                 vision.encode_image_file(p)  # validates existence/type/size only
@@ -240,7 +258,9 @@ def _run_goal(
     _say("-" * 70)
 
     app = build_graph()
-    effective_goal = f"{resume_context}\n\nCONTINUED GOAL:\n{goal}" if resume_context else goal
+    effective_goal = (
+        f"{resume_context}\n\nCONTINUED GOAL:\n{goal}" if resume_context else goal
+    )
     initial_state = {
         "goal": effective_goal,
         "iteration": 0,
@@ -258,19 +278,24 @@ def _run_goal(
     # invoke's duration keeps stdout pure JSON without touching every call
     # site; nothing here reads stdin, so it's a safe blanket swap.
     stdout_guard = (
-        contextlib.redirect_stdout(sys.stderr) if json_mode else contextlib.nullcontext()
+        contextlib.redirect_stdout(sys.stderr)
+        if json_mode
+        else contextlib.nullcontext()
     )
     with stdout_guard:
         final_state = app.invoke(initial_state)
     duration = int(_time.time() - t0)
 
     _stop_reason = (
-        "error" if final_state.get("review_error")
-        else "complete" if final_state.get("review_complete")
+        "error"
+        if final_state.get("review_error")
+        else "complete"
+        if final_state.get("review_complete")
         else "incomplete"
     )
     hooks.fire_stop(
-        config.WORKSPACE_ROOT, stopped_reason=_stop_reason,
+        config.WORKSPACE_ROOT,
+        stopped_reason=_stop_reason,
         summary=(final_state.get("implementation_steps") or ""),
     )
 
@@ -279,6 +304,7 @@ def _run_goal(
 
     if json_mode:
         from wells import pricing
+
         payload = {
             "status": _stop_reason,
             "goal": goal,
@@ -290,8 +316,11 @@ def _run_goal(
             "review_result": (final_state.get("review_result") or "").strip(),
             "git_summary": final_state.get("git_summary", ""),
             "tokens": {
-                "input": t["input"], "output": t["output"], "total": total,
-                "calls": t["calls"], "cache_read": t["cache_read"],
+                "input": t["input"],
+                "output": t["output"],
+                "total": total,
+                "calls": t["calls"],
+                "cache_read": t["cache_read"],
             },
             "cost_usd": pricing.run_cost(),
             "duration_seconds": duration,
@@ -303,7 +332,11 @@ def _run_goal(
             f"\n[tokens] {total:,} total "
             f"({t['input']:,} in / {t['output']:,} out) across {t['calls']} calls"
             + (f", {t['cache_read']:,} cache hits" if t["cache_read"] else "")
-            + (" — set WELLS_TOKEN_REPORT=1 for full breakdown" if total > 50_000 else "")
+            + (
+                " — set WELLS_TOKEN_REPORT=1 for full breakdown"
+                if total > 50_000
+                else ""
+            )
         )
         if os.environ.get("WELLS_TOKEN_REPORT") == "1":
             print("\n" + LEDGER.format_report())
@@ -312,7 +345,9 @@ def _run_goal(
     # Persist session for later resume/history.
     try:
         data = session_from_final_state(
-            session_id, goal, final_state,
+            session_id,
+            goal,
+            final_state,
             workspace=config.WORKSPACE_ROOT,
             tokens_in=t["input"],
             tokens_out=t["output"],
@@ -441,6 +476,7 @@ def _run_index_cmd(args: list[str]) -> None:
         print(f"Clearing index at {config.WORKSPACE_ROOT}...")
         try:
             from wells_index import IndexEngine
+
             engine = IndexEngine(config.WORKSPACE_ROOT)
             engine.clear()
             print("Index cleared.")
@@ -456,7 +492,10 @@ def _run_index_cmd(args: list[str]) -> None:
 def _run_sessions_cmd(args: list[str]) -> None:
     """Handle `wells sessions [list|delete|clear] [--all]` subcommand."""
     from wells.sessions import (
-        clear_sessions, delete_session, format_age, list_sessions,
+        clear_sessions,
+        delete_session,
+        format_age,
+        list_sessions,
     )
 
     all_ws = "--all" in args
@@ -470,7 +509,9 @@ def _run_sessions_cmd(args: list[str]) -> None:
             ws_note = "any workspace" if all_ws else f"workspace: {workspace}"
             print(f"No sessions found ({ws_note}).")
             return
-        print(f"\n{'SESSION ID':<26}  {'AGE':<10}  {'STATUS':<12}  {'TOKENS':>8}   GOAL")
+        print(
+            f"\n{'SESSION ID':<26}  {'AGE':<10}  {'STATUS':<12}  {'TOKENS':>8}   GOAL"
+        )
         print("-" * 92)
         for s in sessions:
             age = format_age(s.get("created_at", ""))
@@ -480,8 +521,10 @@ def _run_sessions_cmd(args: list[str]) -> None:
             goal = (s.get("goal") or "")[:48]
             print(f"{s['id']:<26}  {age:<10}  {status:<12}  {tok_s:>8}   {goal}")
         scope = "all workspaces" if all_ws else "this workspace"
-        print(f"\n{len(sessions)} session(s) — {scope}. "
-              f"Add --all to see every workspace.\n")
+        print(
+            f"\n{len(sessions)} session(s) — {scope}. "
+            f"Add --all to see every workspace.\n"
+        )
 
     elif subcmd == "delete":
         if len(sub_args) < 2:
@@ -497,7 +540,9 @@ def _run_sessions_cmd(args: list[str]) -> None:
     elif subcmd == "clear":
         ws_note = "ALL workspaces" if all_ws else f"workspace: {workspace}"
         try:
-            confirm = input(f"Delete all sessions for {ws_note}? [y/N] ").strip().lower()
+            confirm = (
+                input(f"Delete all sessions for {ws_note}? [y/N] ").strip().lower()
+            )
         except (EOFError, KeyboardInterrupt):
             return
         if confirm in ("y", "yes"):
@@ -512,7 +557,9 @@ def _run_sessions_cmd(args: list[str]) -> None:
         sys.exit(2)
 
 
-def _handle_resume_flag(flag_value: str, goal_args: list[str]) -> tuple[str, str | None]:
+def _handle_resume_flag(
+    flag_value: str, goal_args: list[str]
+) -> tuple[str, str | None]:
     """Resolve -r/--resume into (goal, resume_context).
 
     ``flag_value`` is either "" (interactive picker) or a specific session ID.
@@ -520,8 +567,11 @@ def _handle_resume_flag(flag_value: str, goal_args: list[str]) -> tuple[str, str
     Returns (goal_to_run, resume_context_or_None).
     """
     from wells.sessions import (
-        build_resume_context, format_age, is_session_id,
-        list_sessions, load_session,
+        build_resume_context,
+        format_age,
+        is_session_id,
+        list_sessions,
+        load_session,
     )
 
     if flag_value and is_session_id(flag_value):
@@ -601,7 +651,10 @@ def _print_usage() -> None:
         "  traces                 list recorded run traces for this workspace\n"
         "  replay PATH|N|latest   re-run the harness over a recorded trace and\n"
         "                         report divergence (harness regression check)\n"
-        "  fleet run N \"<task>\"   spawn N parallel worktree attempts at the task\n"
+        "  analyze PATH|N|latest|all\n"
+        "                         cache-efficiency report for a recorded run\n"
+        "                         (per-call cache_read + where the cache breaks)\n"
+        '  fleet run N "<task>"   spawn N parallel worktree attempts at the task\n'
         "  fleet list             list fleets (open + resolved)\n"
         "  fleet show ID          show one fleet's member results\n"
         "  fleet pick ID I        merge member I's branch, clean up the rest\n"
@@ -615,17 +668,22 @@ def _run_traces_cmd(args: list[str]) -> None:
     ws = config.WORKSPACE_ROOT
     found = traces.list_traces(ws)
     if not found:
-        print(f"No traces recorded under {ws}\\.wells\\traces "
-              f"(runs record automatically; WELLS_TRACE=0 disables).")
+        print(
+            f"No traces recorded under {ws}\\.wells\\traces "
+            f"(runs record automatically; WELLS_TRACE=0 disables)."
+        )
         return
     print(f"\nRecorded traces in {ws} (newest last):")
     for i, p in enumerate(found, 1):
         try:
             import json as _json
+
             head = _json.loads(p.read_text(encoding="utf-8"))
             task_prev = " ".join((head.get("task") or "").split())[:60]
-            info = (f"[{head.get('stopped_reason', '?')}, "
-                    f"{head.get('steps_taken', '?')} steps] {task_prev!r}")
+            info = (
+                f"[{head.get('stopped_reason', '?')}, "
+                f"{head.get('steps_taken', '?')} steps] {task_prev!r}"
+            )
         except Exception:
             info = "(unreadable)"
         print(f"  {i}. {p.name}  {info}")
@@ -637,7 +695,7 @@ def _run_fleet_cmd(args: list[str]) -> None:
 
     if not args:
         print(
-            "usage: wells fleet run <N> [--profiles p1,p2,...] \"<task>\"\n"
+            'usage: wells fleet run <N> [--profiles p1,p2,...] "<task>"\n'
             "       wells fleet list\n"
             "       wells fleet show <fleet_id>\n"
             "       wells fleet pick <fleet_id> <member_index>\n"
@@ -649,7 +707,7 @@ def _run_fleet_cmd(args: list[str]) -> None:
     if sub == "run":
         rest = args[1:]
         if not rest or not rest[0].isdigit():
-            print("ERROR: wells fleet run <N> [--profiles p1,p2,...] \"<task>\"")
+            print('ERROR: wells fleet run <N> [--profiles p1,p2,...] "<task>"')
             sys.exit(2)
         n = int(rest[0])
         rest = rest[1:]
@@ -662,18 +720,22 @@ def _run_fleet_cmd(args: list[str]) -> None:
             print("ERROR: no task given.")
             sys.exit(2)
         if n < 2:
-            print("ERROR: N must be >= 2 (a fleet of 1 is just `wells \"<task>\"`).")
+            print('ERROR: N must be >= 2 (a fleet of 1 is just `wells "<task>"`).')
             sys.exit(2)
         print(f"Spawning {n} worktrees for: {task}")
         try:
-            manifest = fleet.run_fleet(config.WORKSPACE_ROOT, task, n, profiles=profiles)
+            manifest = fleet.run_fleet(
+                config.WORKSPACE_ROOT, task, n, profiles=profiles
+            )
         except RuntimeError as e:
             print(f"ERROR: {e}")
             sys.exit(1)
         _print_fleet_manifest(manifest)
-        print(f"\n[fleet: {manifest.fleet_id}] — review, then "
-              f"`wells fleet pick {manifest.fleet_id} <index>` or "
-              f"`wells fleet drop {manifest.fleet_id}`")
+        print(
+            f"\n[fleet: {manifest.fleet_id}] — review, then "
+            f"`wells fleet pick {manifest.fleet_id} <index>` or "
+            f"`wells fleet drop {manifest.fleet_id}`"
+        )
         return
 
     if sub == "list":
@@ -682,7 +744,11 @@ def _run_fleet_cmd(args: list[str]) -> None:
             print("No fleets recorded.")
             return
         for m in manifests:
-            status = f"winner=#{m.winner}" if m.resolved else f"{len(m.members)} member(s), open"
+            status = (
+                f"winner=#{m.winner}"
+                if m.resolved
+                else f"{len(m.members)} member(s), open"
+            )
             print(f"  {m.fleet_id}  [{status}]  {m.task[:60]!r}")
         return
 
@@ -719,8 +785,10 @@ def _run_fleet_cmd(args: list[str]) -> None:
 
 def _print_fleet_manifest(manifest) -> None:
     bar = "=" * 78
-    print(f"\n{bar}\n fleet {manifest.fleet_id} — {manifest.task[:70]!r}\n"
-          f" base branch: {manifest.base_branch}\n{bar}")
+    print(
+        f"\n{bar}\n fleet {manifest.fleet_id} — {manifest.task[:70]!r}\n"
+        f" base branch: {manifest.base_branch}\n{bar}"
+    )
     for m in manifest.members:
         cost = f"${m.cost_usd:.3f}" if m.cost_usd is not None else "?"
         print(
@@ -733,6 +801,24 @@ def _print_fleet_manifest(manifest) -> None:
         if m.error:
             print(f"        [error] {m.error[:150]}")
     print(bar)
+
+
+def _resolve_trace(sel: str):
+    """Resolve N|latest|path|all to a path (or list of paths for 'all')."""
+    from wells import traces
+
+    ws = config.WORKSPACE_ROOT
+    if sel == "all":
+        return traces.list_traces(ws)
+    if sel == "latest":
+        found = traces.list_traces(ws)
+        return found[-1] if found else None
+    if sel.isdigit():
+        found = traces.list_traces(ws)
+        idx = int(sel) - 1
+        return found[idx] if 0 <= idx < len(found) else None
+    p = Path(sel)
+    return p if p.is_file() else None
 
 
 def _run_replay_cmd(args: list[str]) -> None:
@@ -760,10 +846,14 @@ def _run_replay_cmd(args: list[str]) -> None:
 
     print(f"Replaying {path.name} (recorded model outputs, stubbed tools) ...")
     report = traces.replay(path)
-    print(f"\n  stop reason : recorded={report['recorded_stopped_reason']!r}  "
-          f"replayed={report['stopped_reason']!r}")
-    print(f"  steps       : recorded={report['recorded_steps']}  "
-          f"replayed={report['steps_taken']}")
+    print(
+        f"\n  stop reason : recorded={report['recorded_stopped_reason']!r}  "
+        f"replayed={report['stopped_reason']!r}"
+    )
+    print(
+        f"  steps       : recorded={report['recorded_steps']}  "
+        f"replayed={report['steps_taken']}"
+    )
     print(f"  tool calls  : recorded={report['recorded_calls']}")
     print(f"                replayed={report['calls']}")
     if report["match"]:
@@ -771,6 +861,51 @@ def _run_replay_cmd(args: list[str]) -> None:
     else:
         print("\n  DIVERGED — harness behavior changed for this recorded run.")
         sys.exit(1)
+
+
+def _run_analyze_cmd(args: list[str]) -> None:
+    """``wells analyze <N|latest|path|all>`` — cache-efficiency report.
+
+    Per-LLM-call breakdown of input/output/cache_read/cache_efficiency for a
+    recorded run. Use this to see where the prompt cache is breaking — the
+    data the prompt-cache-friendly masking work needs. ``all`` aggregates
+    across every trace in the workspace.
+    """
+    from wells import traces
+
+    if not args:
+        print(
+            "usage: wells analyze <N|latest|path-to-trace.json|all>\n"
+            "       (no arg = latest)"
+        )
+        sel = "latest"
+    else:
+        sel = args[0]
+
+    if sel == "all":
+        found = traces.list_traces(config.WORKSPACE_ROOT)
+        if not found:
+            print("No traces recorded.")
+            return
+        agg = traces.analyze_traces(found)
+        t = agg["totals"]
+        print(f"\nAggregated cache efficiency across {agg['traces']} traces:")
+        print(
+            f"  calls={t['calls']:,}  input={t['input']:,}  output={t['output']:,}  "
+            f"cache_read={t['cache_read']:,}  ({t['cache_efficiency']:.0%} hit)"
+        )
+        if agg["worst_breaks"]:
+            print("\nWorst cache-efficiency drops (trace, round, drop):")
+            for trace_path, rnd, drop in agg["worst_breaks"][:10]:
+                print(f"  - {Path(trace_path).name}  round {rnd}  -{drop:.0%}")
+        return
+
+    path = _resolve_trace(sel)
+    if path is None:
+        print(f"No trace matching {sel!r}. Run `wells traces` to list them.")
+        sys.exit(2)
+    report = traces.analyze_trace(path)
+    print(traces.format_analysis(report))
 
 
 def main() -> None:
@@ -781,6 +916,7 @@ def main() -> None:
     # This runs silently in background on first use
     try:
         from wells import setup
+
         setup.first_run_setup()
     except Exception:
         # Setup failures are non-fatal; system works without indexer (falls back to grep)
@@ -797,10 +933,14 @@ def main() -> None:
     workspace_override: str | None = None
     safety_override: str | None = None
     plan_flag = False
-    print_flag = False   # -p/--print: headless one-shot (already the default for a goal arg)
+    print_flag = (
+        False  # -p/--print: headless one-shot (already the default for a goal arg)
+    )
     output_format = "text"
     image_paths: list[str] = []
-    resume_flag: str | None = None  # None = no resume; "" = interactive; "ID" = specific
+    resume_flag: str | None = (
+        None  # None = no resume; "" = interactive; "ID" = specific
+    )
     remaining: list[str] = []
     i = 0
     while i < len(argv):
@@ -849,6 +989,7 @@ def main() -> None:
             plan_flag = True
         elif a in ("-r", "--resume"):
             from wells.sessions import is_session_id
+
             # Peek ahead: if next arg is a session ID, consume it
             if i + 1 < len(argv) and is_session_id(argv[i + 1]):
                 i += 1
@@ -898,6 +1039,7 @@ def main() -> None:
     if remaining and remaining[0] == "principles":
         # Show which AGENT.md principles are active (and where they come from).
         from wells import principles
+
         ws = config.WORKSPACE_ROOT
         print(f"\nPrinciples source: {principles.source_label(ws)}")
         print("-" * 60)
@@ -914,6 +1056,9 @@ def main() -> None:
         return
     if remaining and remaining[0] == "replay":
         _run_replay_cmd(remaining[1:])
+        return
+    if remaining and remaining[0] == "analyze":
+        _run_analyze_cmd(remaining[1:])
         return
     if remaining and remaining[0] == "fleet":
         _run_fleet_cmd(remaining[1:])
@@ -947,6 +1092,7 @@ def main() -> None:
         if config.INDEX_AUTO_UPDATE:
             try:
                 from wells import index_watcher, index_tools
+
                 ws = config.WORKSPACE_ROOT
                 started = index_watcher.start(ws)
                 if started:
@@ -956,6 +1102,7 @@ def main() -> None:
             except Exception:
                 pass  # watcher is optional — Wells works without it
         from wells.cli import run_repl
+
         run_repl()
         return
 
@@ -963,11 +1110,16 @@ def main() -> None:
         goal, resume_ctx = _handle_resume_flag(resume_flag, goal_args)
         if goal:
             # User supplied a new goal on the CLI: run it once with context.
-            _run_goal(goal, resume_context=resume_ctx, output_format=output_format,
-                     image_paths=image_paths)
+            _run_goal(
+                goal,
+                resume_context=resume_ctx,
+                output_format=output_format,
+                image_paths=image_paths,
+            )
         else:
             # No new goal: enter the TUI with the session context preloaded.
             from wells.cli import run_repl
+
             run_repl(resume_context=resume_ctx)
         return
 

@@ -28,6 +28,7 @@ def _load_encoder() -> None:
     global _ENC
     try:
         import tiktoken
+
         enc = tiktoken.get_encoding("cl100k_base")
     except Exception:
         return
@@ -143,8 +144,15 @@ class TokenLedger:
         with self._lock:
             steps = list(self.steps)
         if not steps:
-            return {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0,
-                    "saved_trim": 0, "saved_summary": 0, "calls": 0}
+            return {
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "cache_read": 0,
+                "saved_trim": 0,
+                "saved_summary": 0,
+                "calls": 0,
+            }
         return {
             "input": sum(s.input_tokens for s in steps),
             "output": sum(s.output_tokens for s in steps),
@@ -170,29 +178,33 @@ class TokenLedger:
             return "(no model calls recorded)"
 
         lines: list[str] = []
-        bar = "=" * 92
+        bar = "=" * 99
         lines.append(bar)
         lines.append("TOKEN USAGE REPORT")
         lines.append(bar)
         header = (
             f"{'STEP':<20} {'TASK':<14} {'IN':>7} {'OUT':>6} {'REASON':>7} "
-            f"{'CACHE':>6} {'SAVE.TR':>8} {'SAVE.SU':>8}"
+            f"{'CACHE':>6} {'CACHE%':>6} {'SAVE.TR':>8} {'SAVE.SU':>8}"
         )
         lines.append(header)
-        lines.append("-" * 92)
+        lines.append("-" * 99)
         with self._lock:
             steps = list(self.steps)
         for s in steps:
+            denom = s.input_tokens + s.cache_read_tokens
+            eff = (s.cache_read_tokens / denom) if denom > 0 else 0.0
             lines.append(
                 f"{s.step:<20} {s.task_type:<14} {s.input_tokens:>7} "
                 f"{s.output_tokens:>6} {s.reasoning_tokens:>7} "
-                f"{s.cache_read_tokens:>6} {s.saved_by_trim:>8} {s.saved_by_summary:>8}"
+                f"{s.cache_read_tokens:>6} {eff:>5.0%} {s.saved_by_trim:>8} {s.saved_by_summary:>8}"
             )
-        lines.append("-" * 92)
+        lines.append("-" * 99)
+        denom = t["input"] + t["cache_read"]
+        overall_eff = (t["cache_read"] / denom) if denom > 0 else 0.0
         lines.append(
             f"{'TOTAL (' + str(t['calls']) + ' calls)':<20} {'':<14} "
             f"{t['input']:>7} {t['output']:>6} {t['reasoning']:>7} "
-            f"{t['cache_read']:>6} {t['saved_trim']:>8} {t['saved_summary']:>8}"
+            f"{t['cache_read']:>6} {overall_eff:>5.0%} {t['saved_trim']:>8} {t['saved_summary']:>8}"
         )
         lines.append("")
 
@@ -203,7 +215,9 @@ class TokenLedger:
             f"({(t['reasoning'] / grand * 100):.0f}% of total)"
         )
         if t["cache_read"]:
-            lines.append(f"  - prompt-cache hits (saved at provider): {t['cache_read']:,}")
+            lines.append(
+                f"  - prompt-cache hits (saved at provider): {t['cache_read']:,}"
+            )
         total_saved = t["saved_trim"] + t["saved_summary"]
         if total_saved:
             pct = total_saved / (t["input"] + total_saved) * 100

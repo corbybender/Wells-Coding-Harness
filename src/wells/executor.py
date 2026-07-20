@@ -74,11 +74,7 @@ def _build_env_context() -> str:
         # Linux — try /etc/os-release for a friendlier name
         try:
             with open("/etc/os-release") as fh:
-                info = dict(
-                    line.strip().split("=", 1)
-                    for line in fh
-                    if "=" in line
-                )
+                info = dict(line.strip().split("=", 1) for line in fh if "=" in line)
             pretty = info.get("PRETTY_NAME", "").strip('"')
             os_str = pretty or f"Linux {platform.release()}"
         except Exception:
@@ -97,17 +93,37 @@ def _build_env_context() -> str:
 
     # CLI tool availability — PATH lookup only, no subprocess overhead
     candidates = [
-        "git", "az", "aws", "gcloud",
-        "docker", "kubectl", "helm", "terraform",
-        "npm", "node", "bun", "deno",
-        "python", "python3", "pip", "uv",
-        "cargo", "rustc", "go",
-        "java", "mvn", "gradle",
+        "git",
+        "az",
+        "aws",
+        "gcloud",
+        "docker",
+        "kubectl",
+        "helm",
+        "terraform",
+        "npm",
+        "node",
+        "bun",
+        "deno",
+        "python",
+        "python3",
+        "pip",
+        "uv",
+        "cargo",
+        "rustc",
+        "go",
+        "java",
+        "mvn",
+        "gradle",
         "dotnet",
-        "curl", "wget",
-        "gh", "hub",
-        "make", "cmake",
-        "jq", "yq",
+        "curl",
+        "wget",
+        "gh",
+        "hub",
+        "make",
+        "cmake",
+        "jq",
+        "yq",
     ]
     available = [t for t in candidates if shutil.which(t)]
 
@@ -134,11 +150,19 @@ class ExecutorResult:
     tool_calls: list[dict] = field(
         default_factory=list
     )  # [{name, args, ok, output_preview}]
-    stopped_reason: str = "done"  # done | max_steps | error | cancelled | budget | stuck_loop
+    stopped_reason: str = (
+        "done"  # done | max_steps | error | cancelled | budget | stuck_loop
+    )
     messages: list[BaseMessage] = field(default_factory=list)
     # True when the final answer was already streamed to the console live
     # (callers should not print result.summary again).
     streamed: bool = False
+    # Per-LLM-call usage log for cache-efficiency analysis. Populated by
+    # _account_usage; persisted into the run trace by traces.record_run so
+    # `wells analyze` can report where the prompt cache breaks. Each entry:
+    # {round, input, output, reasoning, cache_read, cache_creation,
+    # mask_saved, drop_saved, ctx_tokens_at_call, model}.
+    usage_log: list[dict] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +248,9 @@ def _try_bind_structured(llm, profile, toolset: list[tools.ToolDef]):
         return None
 
 
-def _resolve_structured_reply(calls: list[dict], llm_text: str) -> tuple[list[dict], str]:
+def _resolve_structured_reply(
+    calls: list[dict], llm_text: str
+) -> tuple[list[dict], str]:
     """Post-process calls parsed from a structured-mode reply.
 
     - ``final_answer`` pseudo-calls become the final narrative text (the
@@ -246,9 +272,15 @@ def _resolve_structured_reply(calls: list[dict], llm_text: str) -> tuple[list[di
     return real, llm_text
 
 
-def _system_prompt(task: str, toolset: list[tools.ToolDef], *, plan_mode: bool,
-                   workspace: str | None = None, compact: bool = False,
-                   structured: bool = False) -> str:
+def _system_prompt(
+    task: str,
+    toolset: list[tools.ToolDef],
+    *,
+    plan_mode: bool,
+    workspace: str | None = None,
+    compact: bool = False,
+    structured: bool = False,
+) -> str:
     catalog = _tool_catalog(toolset)
     plan_note = (
         "\n\nIMPORTANT: You are in PLAN MODE. Do NOT make changes. Use read-only tools "
@@ -260,6 +292,7 @@ def _system_prompt(task: str, toolset: list[tools.ToolDef], *, plan_mode: bool,
     # The harness operating principles (AGENT.md) are always prepended so every
     # executor run is governed by the constitution, regardless of model.
     from wells.principles import inject_into_prompt as inject_principles
+
     env = _build_env_context()
 
     # Workspace operating rules (RULES.md) + any open liabilities. The
@@ -268,6 +301,7 @@ def _system_prompt(task: str, toolset: list[tools.ToolDef], *, plan_mode: bool,
     rules_block = ""
     try:
         from wells import rules as _rules
+
         if workspace:
             rules_block = _rules.engine_for(workspace).prompt_block(compact=compact)
     except Exception:
@@ -370,6 +404,7 @@ TOOL CALLING — MANDATORY:
     out = inject_principles(base, workspace)
     if not compact:
         from wells import skills as _skills
+
         out = _skills.inject_into_prompt(out, workspace)
     return out
 
@@ -456,7 +491,7 @@ def parse_text_tool_calls(text: str) -> list[dict]:
             if best_failed_attempt is None and _looks_like_tool_call_attempt(blob):
                 best_failed_attempt = blob
             continue
-        for item in (obj if isinstance(obj, list) else [obj]):
+        for item in obj if isinstance(obj, list) else [obj]:
             if isinstance(item, dict):
                 call = _as_call(item)
                 if call:
@@ -496,9 +531,13 @@ _BARE_FILENAME_RE = re.compile(
     re.IGNORECASE,
 )
 _LANG_EXT_ALIASES = {
-    "py": {"python", "py"}, "js": {"javascript", "js"}, "ts": {"typescript", "ts"},
-    "sh": {"sh", "bash", "shell"}, "ps1": {"powershell", "ps1"},
-    "yml": {"yaml", "yml"}, "yaml": {"yaml", "yml"},
+    "py": {"python", "py"},
+    "js": {"javascript", "js"},
+    "ts": {"typescript", "ts"},
+    "sh": {"sh", "bash", "shell"},
+    "ps1": {"powershell", "ps1"},
+    "yml": {"yaml", "yml"},
+    "yaml": {"yaml", "yml"},
 }
 
 
@@ -567,22 +606,68 @@ def _message_text(m: BaseMessage) -> str:
     content = getattr(m, "content", "") or ""
     if isinstance(content, list):
         return " ".join(
-            b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"
+            b.get("text", "")
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
         )
     return content
 
 
 def _account_usage(
-    *, step: str, model: str, messages: list[BaseMessage], resp: BaseMessage,
+    *,
+    step: str,
+    model: str,
+    messages: list[BaseMessage],
+    resp: BaseMessage,
     saved_by_trim: int = 0,
+    usage_log: list[dict] | None = None,
+    round_num: int = 0,
+    mask_saved: int = 0,
+    drop_saved: int = 0,
 ) -> None:
-    """Record token usage for one executor round into the global ledger."""
+    """Record token usage for one executor round into the global ledger.
+
+    Also appends a per-call entry to ``usage_log`` when supplied, so the run
+    trace can later report where the prompt cache broke (round-by-round
+    cache_read delta) and which context-management ops fired.
+    """
     um = getattr(resp, "usage_metadata", None) or {}
     full = "\n".join(_message_text(m) for m in messages)
     input_tokens = um.get("input_tokens") or estimate_tokens(full)
     output_tokens = um.get("output_tokens") or estimate_tokens(
         getattr(resp, "content", "") or ""
     )
+    reasoning = ((um.get("output_token_details") or {}).get("reasoning")) or 0
+    cache_read = ((um.get("input_token_details") or {}).get("cache_read")) or 0
+    cache_creation = ((um.get("input_token_details") or {}).get("cache_creation")) or 0
+    LEDGER.record(
+        step=step,
+        task_type="executor",
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        reasoning_tokens=reasoning,
+        cache_read_tokens=cache_read,
+        category_tokens={"executor_input": input_tokens},
+        saved_by_trim=saved_by_trim,
+    )
+    if usage_log is not None:
+        usage_log.append(
+            {
+                "round": round_num,
+                "model": model,
+                "input": int(input_tokens),
+                "output": int(output_tokens),
+                "reasoning": int(reasoning),
+                "cache_read": int(cache_read),
+                "cache_creation": int(cache_creation),
+                "mask_saved": int(mask_saved),
+                "drop_saved": int(drop_saved),
+                # Estimated prompt size at this call — useful for correlating
+                # cache breaks with context-management events.
+                "ctx_tokens_at_call": estimate_tokens(full),
+            }
+        )
     reasoning = ((um.get("output_token_details") or {}).get("reasoning")) or 0
     cache_read = ((um.get("input_token_details") or {}).get("cache_read")) or 0
     LEDGER.record(
@@ -623,16 +708,32 @@ class WorkingMemory:
     test_status: str = ""
     open_liabilities: str = ""  # undischarged rule obligations (never pruned)
 
-    def update_from_tool(self, name: str, args: dict, result_text: str, ok: bool) -> None:
+    def update_from_tool(
+        self, name: str, args: dict, result_text: str, ok: bool
+    ) -> None:
         path = (
-            args.get("path") or args.get("file_path")
-            or args.get("filename") or args.get("filepath") or ""
+            args.get("path")
+            or args.get("file_path")
+            or args.get("filename")
+            or args.get("filepath")
+            or ""
         )
         if name in {"read_file", "view_file", "cat"} and path:
             if path not in self.files_read:
                 self.files_read.append(path)
-        elif name in {"write_file", "edit_file", "patch_file", "str_replace_editor",
-                      "str_replace", "create_file"} and path and ok:
+        elif (
+            name
+            in {
+                "write_file",
+                "edit_file",
+                "patch_file",
+                "str_replace_editor",
+                "str_replace",
+                "create_file",
+            }
+            and path
+            and ok
+        ):
             if path not in self.files_modified:
                 self.files_modified.append(path)
             if path not in self.files_read:
@@ -641,7 +742,9 @@ class WorkingMemory:
             lines = [l.strip() for l in result_text.splitlines() if l.strip()]
             for line in lines:
                 low = line.lower()
-                if any(k in low for k in ("passed", "failed", "error", "ok", "tests ran")):
+                if any(
+                    k in low for k in ("passed", "failed", "error", "ok", "tests ran")
+                ):
                     self.test_status = line[:200]
                     break
             else:
@@ -660,9 +763,16 @@ class WorkingMemory:
         # populated yet on round 1), so a model that's about to drift off
         # the goal from its very first move gets no re-anchor at all until
         # it's already one step down the wrong path.
-        return not any([self.task, self.files_modified, self.files_read,
-                        self.failed_commands, self.test_status,
-                        self.open_liabilities])
+        return not any(
+            [
+                self.task,
+                self.files_modified,
+                self.files_read,
+                self.failed_commands,
+                self.test_status,
+                self.open_liabilities,
+            ]
+        )
 
     def to_xml(self) -> str:
         parts = [_WM_TAG]
@@ -765,8 +875,8 @@ def _inject_wm(messages: list[BaseMessage], wm: WorkingMemory) -> list[BaseMessa
 _DRIFT_SIMILARITY_THRESHOLD = float(
     __import__("os").environ.get("WELLS_DRIFT_SIMILARITY", "0.3")
 )
-_DRIFT_NUDGE_AT = 2   # consecutive low-similarity rewrites before nudging
-_DRIFT_STOP_AT = 4    # consecutive low-similarity rewrites before hard stop
+_DRIFT_NUDGE_AT = 2  # consecutive low-similarity rewrites before nudging
+_DRIFT_STOP_AT = 4  # consecutive low-similarity rewrites before hard stop
 
 
 def _rewrite_similarity(old: str, new: str) -> float:
@@ -837,8 +947,11 @@ def _mask_tool_result(name: str, args: dict, content: str) -> str:
     Index tools (find_symbol, etc.) are never masked — their output is already compact.
     """
     path = (
-        args.get("path") or args.get("file_path")
-        or args.get("filename") or args.get("pattern") or ""
+        args.get("path")
+        or args.get("file_path")
+        or args.get("filename")
+        or args.get("pattern")
+        or ""
     )
     lines = [l for l in content.splitlines() if l.strip()]
     n = len(lines)
@@ -853,7 +966,13 @@ def _mask_tool_result(name: str, args: dict, content: str) -> str:
         return f"[GREP: '{pat[:60]}' — {len(matches)} matches]"
     elif name == "write_file":
         return f"[WRITE: {path} — {n} lines written, ok]"
-    elif name in {"edit_file", "patch_file", "str_replace_editor", "str_replace", "create_file"}:
+    elif name in {
+        "edit_file",
+        "patch_file",
+        "str_replace_editor",
+        "str_replace",
+        "create_file",
+    }:
         return f"[EDIT: {path} — changes applied]"
     elif name in {"run_tests", "pytest", "test"}:
         for line in lines:
@@ -871,7 +990,11 @@ def _mask_tool_result(name: str, args: dict, content: str) -> str:
         return f"[SKILL LOADED: {args.get('name', '?')}]"
     elif name.startswith("bg_"):
         return content  # background status/collect are already compact
-    elif name.startswith("find_") or name.startswith("search_") or name.startswith("list_symbol"):
+    elif (
+        name.startswith("find_")
+        or name.startswith("search_")
+        or name.startswith("list_symbol")
+    ):
         return content  # index tools are compact; never mask them
     else:
         first = lines[0][:120] if lines else "ok"
@@ -910,7 +1033,9 @@ def _apply_observation_masking(
             continue
         content = m.content or ""
         if isinstance(content, list):
-            content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+            content = " ".join(
+                b.get("text", "") for b in content if isinstance(b, dict)
+            )
         if estimate_tokens(content) <= _MASK_MIN_TOKENS:
             continue
         # Skip if already a 1-liner summary
@@ -919,7 +1044,9 @@ def _apply_observation_masking(
         name, args = tool_meta.get(m.tool_call_id or "", ("", {}))
         masked = _mask_tool_result(name, args, content)
         saved += estimate_tokens(content) - estimate_tokens(masked)
-        result[i] = ToolMessage(content=masked, tool_call_id=m.tool_call_id, name=m.name)
+        result[i] = ToolMessage(
+            content=masked, tool_call_id=m.tool_call_id, name=m.name
+        )
 
     return result, max(0, saved)
 
@@ -993,13 +1120,16 @@ def _safety_drop(
 
     if not saved:
         return messages, 0
-    note = HumanMessage(content=f"[safety drop: ~{saved:,} tokens of old history removed]")
+    note = HumanMessage(
+        content=f"[safety drop: ~{saved:,} tokens of old history removed]"
+    )
     return head + [note] + tail, saved
 
 
 # ---------------------------------------------------------------------------
 # Activity display helpers
 # ---------------------------------------------------------------------------
+
 
 def _extract_llm_text(resp: BaseMessage) -> str:
     """Pull narrative text out of an LLM response (the part before/around tool calls)."""
@@ -1010,7 +1140,8 @@ def _extract_llm_text(resp: BaseMessage) -> str:
         parts = [
             block.get("text", "") if isinstance(block, dict) else str(block)
             for block in c
-            if (isinstance(block, dict) and block.get("type") == "text") or isinstance(block, str)
+            if (isinstance(block, dict) and block.get("type") == "text")
+            or isinstance(block, str)
         ]
         return " ".join(parts).strip()
     return ""
@@ -1039,7 +1170,7 @@ def _strip_env_prefix(cmd: str) -> str:
     so the user sees the actual command rather than boilerplate.
     """
     # Matches one or more $env:NAME='value'; or $env:NAME="value"; prefixes
-    return re.sub(r'^(\$env:\w+=(?:\'[^\']*\'|"[^"]*");\s*)+', '', cmd).strip()
+    return re.sub(r'^(\$env:\w+=(?:\'[^\']*\'|"[^"]*");\s*)+', "", cmd).strip()
 
 
 def _short_path(path: str) -> str:
@@ -1049,7 +1180,7 @@ def _short_path(path: str) -> str:
         ws = config.WORKSPACE_ROOT.replace("\\", "/")
         p2 = p.replace("\\", "/")
         if p2.startswith(ws):
-            p = p2[len(ws):].lstrip("/")
+            p = p2[len(ws) :].lstrip("/")
     except Exception:
         pass
     return ("…" + p[-55:]) if len(p) > 58 else p
@@ -1057,7 +1188,11 @@ def _short_path(path: str) -> str:
 
 def _activity_line(name: str, args: dict, ok: bool, simulated: bool = False) -> str:
     """Format one tool call as a compact human-readable line."""
-    check = "[dim](plan)[/dim]" if simulated else ("[green]✓[/green]" if ok else "[red]✗[/red]")
+    check = (
+        "[dim](plan)[/dim]"
+        if simulated
+        else ("[green]✓[/green]" if ok else "[red]✗[/red]")
+    )
 
     # Read-category tools
     if name == "read_file":
@@ -1069,8 +1204,14 @@ def _activity_line(name: str, args: dict, ok: bool, simulated: bool = False) -> 
         pat = str(args.get("pattern") or args.get("query") or "")[:45]
         desc = f"[dim]grep    [/dim] {pat!r}"
     elif name in ("find_symbol", "find_callers", "search_symbols"):
-        sym = str(args.get("name") or args.get("symbol") or args.get("query") or "")[:45]
-        label = {"find_symbol": "find", "find_callers": "callers", "search_symbols": "search"}.get(name, name)
+        sym = str(args.get("name") or args.get("symbol") or args.get("query") or "")[
+            :45
+        ]
+        label = {
+            "find_symbol": "find",
+            "find_callers": "callers",
+            "search_symbols": "search",
+        }.get(name, name)
         desc = f"[dim]{label:<8}[/dim] {sym}"
 
     # Write-category tools
@@ -1084,7 +1225,7 @@ def _activity_line(name: str, args: dict, ok: bool, simulated: bool = False) -> 
     # Execution tools
     elif name in ("run_command", "shell", "bash"):
         cmd = str(args.get("command") or args.get("cmd") or "")
-        cmd = _strip_env_prefix(cmd)   # remove $env:VAR='...'; boilerplate
+        cmd = _strip_env_prefix(cmd)  # remove $env:VAR='...'; boilerplate
         if len(cmd) > 70:
             cmd = cmd[:67] + "…"
         desc = f"[cyan]run     [/cyan] {cmd}"
@@ -1100,7 +1241,9 @@ def _activity_line(name: str, args: dict, ok: bool, simulated: bool = False) -> 
     elif name == "load_skill":
         desc = f"[dim]skill   [/dim] {args.get('name', '?')}"
     elif name in ("bg_start", "bg_status", "bg_collect"):
-        label = {"bg_start": "bg▶", "bg_status": "bg?", "bg_collect": "bg◀"}.get(name, "bg")
+        label = {"bg_start": "bg▶", "bg_status": "bg?", "bg_collect": "bg◀"}.get(
+            name, "bg"
+        )
         role = args.get("role") or (args.get("id") or "")
         desc = f"[magenta]{label:<8}[/magenta] {role}"
 
@@ -1134,6 +1277,7 @@ def run_executor(
     result = _run_executor_impl(task=task, ctx=ctx, **kwargs)
     try:
         from wells import traces as _traces
+
         _traces.record_run(
             task=task,
             workspace=getattr(ctx, "workspace", None),
@@ -1200,6 +1344,11 @@ def _run_executor_impl(
     cap = max_steps if max_steps is not None else config.MAX_TOOL_STEPS
     profile = profile or config.ACTIVE_PROFILE
 
+    # Per-LLM-call usage log: populated by _account_usage, surfaced on
+    # ExecutorResult and persisted into the run trace so `wells analyze`
+    # can report cache efficiency round-by-round.
+    usage_log: list[dict] = []
+
     # Local models (commonly Ollama) often load with a small context window
     # (Ollama's own default: 4096) regardless of what the model architecture
     # supports — measured live, Wells' full system prompt alone can reach
@@ -1242,8 +1391,14 @@ def _run_executor_impl(
             llm = bound
     _structured_fallback_used = False
 
-    system = _system_prompt(task, toolset, plan_mode=ctx.plan_mode, workspace=ctx.workspace,
-                            compact=compact_prompt, structured=structured_mode)
+    system = _system_prompt(
+        task,
+        toolset,
+        plan_mode=ctx.plan_mode,
+        workspace=ctx.workspace,
+        compact=compact_prompt,
+        structured=structured_mode,
+    )
     if system_prefix:
         system = f"{system_prefix}\n\n{system}"
 
@@ -1252,21 +1407,26 @@ def _run_executor_impl(
         messages.extend(seed_messages)
     elif images:
         from wells import vision as _vision
+
         try:
             content = _vision.build_multimodal_content(
                 f"Please complete this task:\n{task}", images
             )
         except _vision.VisionError as e:
             return ExecutorResult(
-                summary=f"[executor error: {e}]", stopped_reason="error",
+                summary=f"[executor error: {e}]",
+                stopped_reason="error",
                 messages=[SystemMessage(content=system)],
             )
         _vision_model_name = model_label.label() if model_label else profile
         if not _vision.provider_supports_vision(_vision_model_name):
-            _ui("warn", f"  [yellow]⚠ {len(images)} image(s) attached, but "
-                        f"'{_vision_model_name}' doesn't look vision-capable — "
-                        f"sending anyway; the provider may ignore or reject "
-                        f"it.[/yellow]")
+            _ui(
+                "warn",
+                f"  [yellow]⚠ {len(images)} image(s) attached, but "
+                f"'{_vision_model_name}' doesn't look vision-capable — "
+                f"sending anyway; the provider may ignore or reject "
+                f"it.[/yellow]",
+            )
         messages.append(HumanMessage(content=content))
     else:
         messages.append(HumanMessage(content=f"Please complete this task:\n{task}"))
@@ -1279,8 +1439,13 @@ def _run_executor_impl(
     # models get it as a structured message. Silent before this, so a
     # bind_tools() that "succeeds" mechanically without real model support
     # was indistinguishable from genuine native support.
-    _tc_mode = ("structured-json" if structured_mode
-                else "native" if native_tools else "text-fallback")
+    _tc_mode = (
+        "structured-json"
+        if structured_mode
+        else "native"
+        if native_tools
+        else "text-fallback"
+    )
     _ui("round", f"[dim]model: {model_name} · tool-calling: {_tc_mode}[/dim]")
 
     wm = WorkingMemory(task=task)
@@ -1293,12 +1458,16 @@ def _run_executor_impl(
     # it silently keep editing the workspace with no visibility.
     try:
         from wells import background as _bg
+
         _n_abandoned_bg = _bg.REGISTRY.reset()
         if _n_abandoned_bg:
-            _ui("warn", f"  [yellow]⚠ {_n_abandoned_bg} background agent(s) from "
-                        f"a previous task were still running and have been "
-                        f"abandoned — they may still be mid-edit in this "
-                        f"workspace.[/yellow]")
+            _ui(
+                "warn",
+                f"  [yellow]⚠ {_n_abandoned_bg} background agent(s) from "
+                f"a previous task were still running and have been "
+                f"abandoned — they may still be mid-edit in this "
+                f"workspace.[/yellow]",
+            )
     except Exception:
         pass
 
@@ -1306,6 +1475,7 @@ def _run_executor_impl(
     if config.RULES_ENFORCE:
         try:
             from wells import rules as _rules_mod
+
             rules_engine = _rules_mod.engine_for(ctx.workspace)
         except Exception:
             rules_engine = None
@@ -1315,16 +1485,16 @@ def _run_executor_impl(
     rounds = 0
     stall_nudges = 0
     failure_ack_nudges = 0
-    _rep_abort_nudges = 0   # generations aborted by the repetition guard
+    _rep_abort_nudges = 0  # generations aborted by the repetition guard
     total_saved = 0
     _read_ranges: dict[str, list[tuple[int, int]]] = {}  # path → [(offset, end), ...]
-    _fail_patterns: dict[str, int] = {}                  # command prefix → fail count
-    _last_call_key: str | None = None                    # name+args of the previous call
-    _last_call_repeat = 0                                 # consecutive repeats of that call
-    _unknown_tool_streak = 0    # consecutive calls to a name not in toolset
+    _fail_patterns: dict[str, int] = {}  # command prefix → fail count
+    _last_call_key: str | None = None  # name+args of the previous call
+    _last_call_repeat = 0  # consecutive repeats of that call
+    _unknown_tool_streak = 0  # consecutive calls to a name not in toolset
     _known_tool_names = {t.name for t in toolset}
-    _file_write_history: dict[str, str] = {}   # path → most recent full content written
-    _drift_streak = 0           # consecutive low-similarity full rewrites of one path
+    _file_write_history: dict[str, str] = {}  # path → most recent full content written
+    _drift_streak = 0  # consecutive low-similarity full rewrites of one path
     _drift_path: str | None = None
     _readonly_names = {t.name for t in toolset if not t.mutating}
     # Read-only dedupe cache: call_key → (round, step) of the last execution.
@@ -1339,6 +1509,7 @@ def _run_executor_impl(
             tool_calls=history,
             stopped_reason=reason,
             messages=messages,
+            usage_log=usage_log,
         )
 
     _escalated = False
@@ -1374,7 +1545,8 @@ def _run_executor_impl(
         _escalated = True
         structured = (
             _try_bind_structured(new_llm, esc_profile, toolset)
-            if config.STRUCTURED_OUTPUTS else None
+            if config.STRUCTURED_OUTPUTS
+            else None
         )
         if structured is not None:
             llm = structured
@@ -1391,8 +1563,12 @@ def _run_executor_impl(
         compact_prompt = bool(config.providers._looks_like_local_ollama(esc_profile))
         ctx_drop_threshold, ctx_drop_target = _effective_ctx_budget(compact_prompt)
         new_system = _system_prompt(
-            task, toolset, plan_mode=ctx.plan_mode, workspace=ctx.workspace,
-            compact=compact_prompt, structured=structured_mode,
+            task,
+            toolset,
+            plan_mode=ctx.plan_mode,
+            workspace=ctx.workspace,
+            compact=compact_prompt,
+            structured=structured_mode,
         )
         if system_prefix:
             new_system = f"{system_prefix}\n\n{new_system}"
@@ -1404,14 +1580,21 @@ def _run_executor_impl(
         _last_call_key = None
         _drift_streak = 0
         _drift_path = None
-        messages.append(HumanMessage(content=(
-            f"[HARNESS: The previous model {reason} and has been replaced — "
-            f"you ({model_name}) are now driving this run. Review the "
-            f"transcript above, work out where it went wrong, and continue "
-            f"the ORIGINAL task from the current state of the workspace.]"
-        )))
-        _ui("warn", f"  [bold magenta]⬆ escalating to {model_name} — previous "
-                    f"model {reason}[/bold magenta]")
+        messages.append(
+            HumanMessage(
+                content=(
+                    f"[HARNESS: The previous model {reason} and has been replaced — "
+                    f"you ({model_name}) are now driving this run. Review the "
+                    f"transcript above, work out where it went wrong, and continue "
+                    f"the ORIGINAL task from the current state of the workspace.]"
+                )
+            )
+        )
+        _ui(
+            "warn",
+            f"  [bold magenta]⬆ escalating to {model_name} — previous "
+            f"model {reason}[/bold magenta]",
+        )
         return True
 
     budget = config.MAX_RUN_TOKENS
@@ -1429,25 +1612,35 @@ def _run_executor_impl(
             t = LEDGER.totals()
             used = t["input"] + t["output"]
             if used >= budget:
-                _ui("warn", f"\n[bold red]Token budget reached "
-                           f"({used:,}/{budget:,}) — stopping.[/bold red]")
+                _ui(
+                    "warn",
+                    f"\n[bold red]Token budget reached "
+                    f"({used:,}/{budget:,}) — stopping.[/bold red]",
+                )
                 return _stopped(
                     "budget",
                     f"(stopped: token budget of {budget:,} reached at {used:,} tokens)",
                 )
             if not budget_warned and used >= 0.8 * budget:
                 budget_warned = True
-                _ui("warn", f"\n[yellow]⚠ {used:,} of {budget:,} run tokens used "
-                           f"({used * 100 // budget}%).[/yellow]")
+                _ui(
+                    "warn",
+                    f"\n[yellow]⚠ {used:,} of {budget:,} run tokens used "
+                    f"({used * 100 // budget}%).[/yellow]",
+                )
 
         # ── Mid-run steering: user /steer notes land in the next round ──────
         steers = CONTROL.drain_steers()
         if steers:
             for s in steers:
-                messages.append(HumanMessage(content=(
-                    f"[USER STEER — read this NOW, mid-task instruction]: {s}\n"
-                    f"Adjust your current approach accordingly before continuing."
-                )))
+                messages.append(
+                    HumanMessage(
+                        content=(
+                            f"[USER STEER — read this NOW, mid-task instruction]: {s}\n"
+                            f"Adjust your current approach accordingly before continuing."
+                        )
+                    )
+                )
                 _ui("warn", f"  [bold cyan]⮕ steer delivered:[/bold cyan] {s[:90]}")
 
         # ── Context management pipeline (order matters) ──────────────────────
@@ -1499,10 +1692,13 @@ def _run_executor_impl(
                 native_tools = bound is not None
                 if native_tools:
                     llm = bound
-                _ui("warn", "  [yellow]⚠ structured output rejected by the "
-                            "server — falling back to "
-                            f"{'native' if native_tools else 'text'} tool "
-                            "calling[/yellow]")
+                _ui(
+                    "warn",
+                    "  [yellow]⚠ structured output rejected by the "
+                    "server — falling back to "
+                    f"{'native' if native_tools else 'text'} tool "
+                    "calling[/yellow]",
+                )
                 continue
             return ExecutorResult(
                 summary=f"[executor error: {type(e).__name__}: {e}]",
@@ -1510,14 +1706,24 @@ def _run_executor_impl(
                 tool_calls=history,
                 stopped_reason="error",
                 messages=messages,
+                usage_log=usage_log,
             )
         if resp is None:
             # Cancelled while waiting on the model — there's no way to abort
             # an in-flight HTTP request, so the call keeps running on its own
             # thread and its eventual result is simply discarded.
             return _stopped("cancelled", "(cancelled by user)")
-        _account_usage(step=step_label, model=model_name, messages=messages, resp=resp,
-                       saved_by_trim=saved)
+        _account_usage(
+            step=step_label,
+            model=model_name,
+            messages=messages,
+            resp=resp,
+            saved_by_trim=saved,
+            usage_log=usage_log,
+            round_num=rounds,
+            mask_saved=mask_saved,
+            drop_saved=drop_saved,
+        )
         messages.append(resp)
 
         calls = _extract_calls(resp, native_tools=native_tools)
@@ -1546,22 +1752,29 @@ def _run_executor_impl(
             # than accepting (or salvaging from) a degenerate loop's output.
             if gen_aborted:
                 _rep_abort_nudges += 1
-                _ui("warn", f"  [bold yellow]⚠ generation aborted — output was "
-                            f"repeating itself (attempt {_rep_abort_nudges}/3)"
-                            f"[/bold yellow]")
+                _ui(
+                    "warn",
+                    f"  [bold yellow]⚠ generation aborted — output was "
+                    f"repeating itself (attempt {_rep_abort_nudges}/3)"
+                    f"[/bold yellow]",
+                )
                 if _rep_abort_nudges >= 3:
                     return _stopped(
                         "stuck_loop",
                         "(stopped: the model's output degenerated into verbatim "
                         "self-repetition on 3 consecutive replies)",
                     )
-                messages.append(HumanMessage(content=(
-                    "[HARNESS: Your previous reply was cut off because it was "
-                    "repeating the same text over and over. Do not repeat "
-                    "yourself. Continue the task with ONE concise reply — a "
-                    "tool call if action is needed, or a short final summary "
-                    "if the task is done.]"
-                )))
+                messages.append(
+                    HumanMessage(
+                        content=(
+                            "[HARNESS: Your previous reply was cut off because it was "
+                            "repeating the same text over and over. Do not repeat "
+                            "yourself. Continue the task with ONE concise reply — a "
+                            "tool call if action is needed, or a short final summary "
+                            "if the task is done.]"
+                        )
+                    )
+                )
                 continue
             # Zero tool calls with zero real action taken so far this run is
             # almost never a genuine finish for a task that requires changes —
@@ -1576,33 +1789,53 @@ def _run_executor_impl(
             # more rounds asking the model to do something it isn't going to
             # do. This still goes through the same rules gate a real write_file
             # call would hit, so it can't bypass confirm/block policy.
-            salvage = _try_salvage_write(task, llm_text) if steps == 0 and llm_text else None
+            salvage = (
+                _try_salvage_write(task, llm_text) if steps == 0 and llm_text else None
+            )
             if salvage:
                 path, content = salvage
                 s_args = {"path": path, "content": content}
-                s_decision = rules_engine.check("write_file", s_args) if rules_engine else None
+                s_decision = (
+                    rules_engine.check("write_file", s_args) if rules_engine else None
+                )
                 if s_decision is not None and not s_decision.allow:
                     obs = "\n".join(s_decision.notes) or "[RULES: action blocked]"
-                    _ui("warn", f"  [bold red]⛔ rule "
-                                f"{s_decision.rule.id if s_decision.rule else '?'} "
-                                f"blocked salvaged write_file[/bold red]")
-                    messages.append(HumanMessage(content=(
-                        f"[HARNESS: Detected an unwrapped code block addressed to "
-                        f"'{path}' but a workspace rule blocked writing it: {obs} "
-                        f"Call the tool yourself with a compliant alternative.]"
-                    )))
+                    _ui(
+                        "warn",
+                        f"  [bold red]⛔ rule "
+                        f"{s_decision.rule.id if s_decision.rule else '?'} "
+                        f"blocked salvaged write_file[/bold red]",
+                    )
+                    messages.append(
+                        HumanMessage(
+                            content=(
+                                f"[HARNESS: Detected an unwrapped code block addressed to "
+                                f"'{path}' but a workspace rule blocked writing it: {obs} "
+                                f"Call the tool yourself with a compliant alternative.]"
+                            )
+                        )
+                    )
                 elif s_decision is not None and s_decision.confirm:
                     from wells import safety as _safety
+
                     ap = ctx.approver or _safety.get_approver()
                     rid = s_decision.rule.id if s_decision.rule else "rule"
-                    approved = bool(ap(f"rule:{rid}", f"salvaged write_file: {path}")) if ap else False
+                    approved = (
+                        bool(ap(f"rule:{rid}", f"salvaged write_file: {path}"))
+                        if ap
+                        else False
+                    )
                     if not approved:
-                        messages.append(HumanMessage(content=(
-                            f"[HARNESS: Detected an unwrapped code block addressed to "
-                            f"'{path}' but writing it requires confirmation that "
-                            f"wasn't granted. Call write_file yourself if you still "
-                            f"want this written.]"
-                        )))
+                        messages.append(
+                            HumanMessage(
+                                content=(
+                                    f"[HARNESS: Detected an unwrapped code block addressed to "
+                                    f"'{path}' but writing it requires confirmation that "
+                                    f"wasn't granted. Call write_file yourself if you still "
+                                    f"want this written.]"
+                                )
+                            )
+                        )
                         salvage = None
                 if salvage and (s_decision is None or s_decision.allow):
                     steps += 1
@@ -1617,29 +1850,46 @@ def _run_executor_impl(
                             obs_text = obs_text + "\n\n" + "\n".join(rule_notes)
                         wm.open_liabilities = rules_engine.liability_summary()
                     wm.update_from_tool("write_file", s_args, obs_text, result.ok)
-                    history.append({
-                        "name": "write_file", "args": {"path": path}, "ok": result.ok,
-                        "output_preview": (result.output or result.error or "")[:200],
-                        "simulated": result.simulated, "salvaged": True,
-                    })
-                    _ui("warn", f"  [yellow]⚠ model answered with a code block instead "
-                                f"of a tool call — harness salvaged it into "
-                                f"write_file({path!r})[/yellow]")
-                    messages.append(HumanMessage(content=(
-                        f"[HARNESS: You replied with a code block but no tool call. "
-                        f"The harness matched it to '{path}' (named in the task) and "
-                        f"wrote it directly:\n{obs_text}\n"
-                        f"If more work remains, continue with tool calls — you must "
-                        f"use them for anything further. If the task is complete, say "
-                        f"so with no further action.]"
-                    )))
+                    history.append(
+                        {
+                            "name": "write_file",
+                            "args": {"path": path},
+                            "ok": result.ok,
+                            "output_preview": (result.output or result.error or "")[
+                                :200
+                            ],
+                            "simulated": result.simulated,
+                            "salvaged": True,
+                        }
+                    )
+                    _ui(
+                        "warn",
+                        f"  [yellow]⚠ model answered with a code block instead "
+                        f"of a tool call — harness salvaged it into "
+                        f"write_file({path!r})[/yellow]",
+                    )
+                    messages.append(
+                        HumanMessage(
+                            content=(
+                                f"[HARNESS: You replied with a code block but no tool call. "
+                                f"The harness matched it to '{path}' (named in the task) and "
+                                f"wrote it directly:\n{obs_text}\n"
+                                f"If more work remains, continue with tool calls — you must "
+                                f"use them for anything further. If the task is complete, say "
+                                f"so with no further action.]"
+                            )
+                        )
+                    )
                 CONTROL.set_progress(step_label, steps, cap)
                 continue
             if steps == 0 and llm_text and stall_nudges < config.STALL_NUDGE_MAX:
                 stall_nudges += 1
-                _ui("warn", f"  [yellow]⚠ model produced text but no tool call "
-                            f"(attempt {stall_nudges}/{config.STALL_NUDGE_MAX}) — "
-                            f"nudging back onto the tool-calling protocol[/yellow]")
+                _ui(
+                    "warn",
+                    f"  [yellow]⚠ model produced text but no tool call "
+                    f"(attempt {stall_nudges}/{config.STALL_NUDGE_MAX}) — "
+                    f"nudging back onto the tool-calling protocol[/yellow]",
+                )
                 if structured_mode:
                     nudge = (
                         "[HARNESS: You replied with final_answer before taking any "
@@ -1669,29 +1919,53 @@ def _run_executor_impl(
             # don't let the run end there. A model that explicitly reports
             # the failure as a blocker (permitted by WORKING RULES #5) is
             # left alone — only silent, unacknowledged failure is refused.
-            _ack_words = ("fail", "error", "unable", "cannot", "can't", "couldn't",
-                          "block", "issue", "problem", "did not", "didn't", "won't",
-                          "not able", "no module", "not found", "denied")
+            _ack_words = (
+                "fail",
+                "error",
+                "unable",
+                "cannot",
+                "can't",
+                "couldn't",
+                "block",
+                "issue",
+                "problem",
+                "did not",
+                "didn't",
+                "won't",
+                "not able",
+                "no module",
+                "not found",
+                "denied",
+            )
             _acked_failure = any(w in (llm_text or "").lower() for w in _ack_words)
             if (
-                history and not history[-1]["ok"] and not _acked_failure
+                history
+                and not history[-1]["ok"]
+                and not _acked_failure
                 and failure_ack_nudges < config.STALL_NUDGE_MAX
             ):
                 failure_ack_nudges += 1
                 last = history[-1]
-                _ui("warn", f"  [yellow]⚠ run ending right after a failed "
-                            f"{last['name']} with no fix attempted (attempt "
-                            f"{failure_ack_nudges}/{config.STALL_NUDGE_MAX}) — "
-                            f"refusing to accept as complete[/yellow]")
-                messages.append(HumanMessage(content=(
-                    f"[HARNESS: Your last action ({last['name']}) failed:\n"
-                    f"{last['output_preview']}\n"
-                    f"Your reply did not fix this, retry a different approach, or "
-                    f"explicitly report it as a blocker — it just moved on as if "
-                    f"the task were done. It is not done while the failure stands "
-                    f"unaddressed. Either resolve it, try something else, or state "
-                    f"clearly that this is blocking completion and why.]"
-                )))
+                _ui(
+                    "warn",
+                    f"  [yellow]⚠ run ending right after a failed "
+                    f"{last['name']} with no fix attempted (attempt "
+                    f"{failure_ack_nudges}/{config.STALL_NUDGE_MAX}) — "
+                    f"refusing to accept as complete[/yellow]",
+                )
+                messages.append(
+                    HumanMessage(
+                        content=(
+                            f"[HARNESS: Your last action ({last['name']}) failed:\n"
+                            f"{last['output_preview']}\n"
+                            f"Your reply did not fix this, retry a different approach, or "
+                            f"explicitly report it as a blocker — it just moved on as if "
+                            f"the task were done. It is not done while the failure stands "
+                            f"unaddressed. Either resolve it, try something else, or state "
+                            f"clearly that this is blocking completion and why.]"
+                        )
+                    )
+                )
                 continue
             # Either the model has already taken real action this run (a
             # normal wrap-up summary), or it exhausted its coaching budget —
@@ -1704,6 +1978,7 @@ def _run_executor_impl(
                 tool_calls=history,
                 stopped_reason="done",
                 messages=messages,
+                usage_log=usage_log,
                 streamed=streamed_this_round and bool(llm_text),
             )
 
@@ -1727,6 +2002,7 @@ def _run_executor_impl(
                         break
                 if config.HOOKS_ENABLE:
                     from wells import hooks as _hooks_mod
+
                     _h_ok, _ = _hooks_mod.fire_pre_tool_use(
                         ctx.workspace, _cname, _c.get("args") or {}
                     )
@@ -1735,12 +2011,17 @@ def _run_executor_impl(
                 _par_idx.append(_i)
             if len(_par_idx) > 1:
                 from concurrent.futures import ThreadPoolExecutor as _TPE
-                with _TPE(max_workers=min(4, len(_par_idx)),
-                          thread_name_prefix="wells-par-read") as _pool:
+
+                with _TPE(
+                    max_workers=min(4, len(_par_idx)),
+                    thread_name_prefix="wells-par-read",
+                ) as _pool:
                     _futs = {
                         _i: _pool.submit(
-                            tools.dispatch, calls[_i]["name"],
-                            calls[_i].get("args") or {}, ctx,
+                            tools.dispatch,
+                            calls[_i]["name"],
+                            calls[_i].get("args") or {},
+                            ctx,
                         )
                         for _i in _par_idx
                     }
@@ -1769,16 +2050,17 @@ def _run_executor_impl(
                     # gives it nothing to act on.
                     obs_text = (
                         "[error: tool call JSON failed to parse — most likely an "
-                        "unescaped \" character inside a string value (e.g. source "
-                        "code containing \"utf8\" must be written as \\\"utf8\\\" "
+                        'unescaped " character inside a string value (e.g. source '
+                        'code containing "utf8" must be written as \\"utf8\\" '
                         "inside the JSON string). Your text was:\n"
                         f"{parse_err[:1500]}\n"
                         "Re-emit the call with correctly escaped JSON.]"
                     )
                 else:
                     obs_text = "[error: malformed tool call — missing name]"
-                history.append({"name": "?", "args": args, "ok": False,
-                                "output_preview": obs_text})
+                history.append(
+                    {"name": "?", "args": args, "ok": False, "output_preview": obs_text}
+                )
                 messages.append(
                     _tool_message(obs_text, tool_call_id="parseerr", name="parse_error")
                 )
@@ -1806,35 +2088,63 @@ def _run_executor_impl(
                 rule_notes = list(decision.notes)
                 if not decision.allow:
                     obs_text = "\n".join(rule_notes) or "[RULES: action blocked]"
-                    _ui("warn", f"  [bold red]⛔ rule "
-                                f"{decision.rule.id if decision.rule else '?'} "
-                                f"blocked {name}[/bold red]")
-                    history.append({"name": name, "args": args, "ok": False,
-                                    "output_preview": obs_text[:200]})
-                    messages.append(_tool_message(
-                        obs_text, tool_call_id=tcid, name=name, ai_message=resp))
+                    _ui(
+                        "warn",
+                        f"  [bold red]⛔ rule "
+                        f"{decision.rule.id if decision.rule else '?'} "
+                        f"blocked {name}[/bold red]",
+                    )
+                    history.append(
+                        {
+                            "name": name,
+                            "args": args,
+                            "ok": False,
+                            "output_preview": obs_text[:200],
+                        }
+                    )
+                    messages.append(
+                        _tool_message(
+                            obs_text, tool_call_id=tcid, name=name, ai_message=resp
+                        )
+                    )
                     continue
                 if decision.confirm:
                     from wells import safety as _safety
+
                     ap = ctx.approver or _safety.get_approver()
                     rid = decision.rule.id if decision.rule else "rule"
                     detail = str(args.get("command") or args)[:160]
                     approved = bool(ap(f"rule:{rid}", detail)) if ap else False
                     if not approved:
-                        why = ("denied by user" if ap else
-                               "no approver available — confirm-severity rules "
-                               "require an interactive session")
+                        why = (
+                            "denied by user"
+                            if ap
+                            else "no approver available — confirm-severity rules "
+                            "require an interactive session"
+                        )
                         obs_text = (
                             f"[RULES {rid}: action NOT executed ({why}). "
                             f"{decision.rule.message if decision.rule else ''} "
                             f"Choose a compliant alternative or ask the user.]"
                         )
-                        _ui("warn", f"  [yellow]⛔ rule {rid}: {name} not "
-                                    f"executed ({why})[/yellow]")
-                        history.append({"name": name, "args": args, "ok": False,
-                                        "output_preview": obs_text[:200]})
-                        messages.append(_tool_message(
-                            obs_text, tool_call_id=tcid, name=name, ai_message=resp))
+                        _ui(
+                            "warn",
+                            f"  [yellow]⛔ rule {rid}: {name} not "
+                            f"executed ({why})[/yellow]",
+                        )
+                        history.append(
+                            {
+                                "name": name,
+                                "args": args,
+                                "ok": False,
+                                "output_preview": obs_text[:200],
+                            }
+                        )
+                        messages.append(
+                            _tool_message(
+                                obs_text, tool_call_id=tcid, name=name, ai_message=resp
+                            )
+                        )
                         continue
 
             # ── PreToolUse hooks: user-scriptable gate, separate from rules ──
@@ -1846,14 +2156,29 @@ def _run_executor_impl(
             # was scheduled — see the prefetch eligibility filter above.
             if config.HOOKS_ENABLE and _call_idx not in _prefetched:
                 from wells import hooks as _hooks_mod
-                hook_allowed, hook_reason = _hooks_mod.fire_pre_tool_use(ctx.workspace, name, args)
+
+                hook_allowed, hook_reason = _hooks_mod.fire_pre_tool_use(
+                    ctx.workspace, name, args
+                )
                 if not hook_allowed:
                     obs_text = f"[HOOK: action blocked — {hook_reason}]"
-                    _ui("warn", f"  [bold red]⛔ hook blocked {name}: {hook_reason[:100]}[/bold red]")
-                    history.append({"name": name, "args": args, "ok": False,
-                                    "output_preview": obs_text[:200]})
-                    messages.append(_tool_message(
-                        obs_text, tool_call_id=tcid, name=name, ai_message=resp))
+                    _ui(
+                        "warn",
+                        f"  [bold red]⛔ hook blocked {name}: {hook_reason[:100]}[/bold red]",
+                    )
+                    history.append(
+                        {
+                            "name": name,
+                            "args": args,
+                            "ok": False,
+                            "output_preview": obs_text[:200],
+                        }
+                    )
+                    messages.append(
+                        _tool_message(
+                            obs_text, tool_call_id=tcid, name=name, ai_message=resp
+                        )
+                    )
                     continue
 
             _act(f"{name} · step {steps}/{cap_s}")
@@ -1866,11 +2191,7 @@ def _run_executor_impl(
             # re-dispatching — saves the tokens of a duplicate full output
             # and makes a re-read loop visible to the model immediately.
             _dedupe_hit = False
-            if (
-                result is None
-                and config.DEDUPE_READS
-                and name in _readonly_names
-            ):
+            if result is None and config.DEDUPE_READS and name in _readonly_names:
                 _seen = _readonly_seen.get(call_key)
                 if _seen is not None and (rounds - _seen[0]) < _MASK_KEEP_ROUNDS:
                     _dedupe_hit = True
@@ -1905,8 +2226,12 @@ def _run_executor_impl(
             # notes).
             if config.HOOKS_ENABLE:
                 from wells import hooks as _hooks_mod
+
                 _hook_notes = _hooks_mod.fire_post_tool_use(
-                    ctx.workspace, name, args, ok=result.ok,
+                    ctx.workspace,
+                    name,
+                    args,
+                    ok=result.ok,
                     output_preview=(result.output or result.error or ""),
                 )
                 if _hook_notes:
@@ -1933,21 +2258,29 @@ def _run_executor_impl(
                     f"Pick one of those, or if none fits, stop and describe the "
                     f"blocker in plain text with no tool call.]"
                 )
-                _ui("warn", f"  [bold yellow]⚠ invented tool name "
-                            f"'{name}' called {_unknown_tool_streak}× in a row — "
-                            f"model told the real tool list[/bold yellow]")
+                _ui(
+                    "warn",
+                    f"  [bold yellow]⚠ invented tool name "
+                    f"'{name}' called {_unknown_tool_streak}× in a row — "
+                    f"model told the real tool list[/bold yellow]",
+                )
             if _unknown_tool_streak >= 6:
                 messages.append(
-                    _tool_message(obs_text, tool_call_id=tcid, name=name, ai_message=resp)
+                    _tool_message(
+                        obs_text, tool_call_id=tcid, name=name, ai_message=resp
+                    )
                 )
                 if _try_escalate(
                     f"kept inventing nonexistent tool names "
                     f"({_unknown_tool_streak}× in a row)"
                 ):
                     break
-                _ui("warn", f"  [bold red]⛔ stuck loop — model kept inventing "
-                            f"nonexistent tool names ({_unknown_tool_streak}× in a "
-                            f"row), stopping the run[/bold red]")
+                _ui(
+                    "warn",
+                    f"  [bold red]⛔ stuck loop — model kept inventing "
+                    f"nonexistent tool names ({_unknown_tool_streak}× in a "
+                    f"row), stopping the run[/bold red]",
+                )
                 return _stopped(
                     "stuck_loop",
                     f"(stopped: model called nonexistent tool names "
@@ -1967,9 +2300,12 @@ def _run_executor_impl(
                     f"it again will not produce new information — change your "
                     f"approach or report what is blocking you.]"
                 )
-                _ui("warn", f"  [bold yellow]⚠ {name} repeated "
-                            f"{_last_call_repeat}× with identical args — model "
-                            f"told to change approach[/bold yellow]")
+                _ui(
+                    "warn",
+                    f"  [bold yellow]⚠ {name} repeated "
+                    f"{_last_call_repeat}× with identical args — model "
+                    f"told to change approach[/bold yellow]",
+                )
 
             if rules_engine is not None and decision is not None:
                 # Liability transitions apply only after the command actually
@@ -1987,13 +2323,15 @@ def _run_executor_impl(
                 wm.open_liabilities = rules_engine.liability_summary()
             wm.update_from_tool(name, args, obs_text, result.ok)
 
-            history.append({
-                "name": name,
-                "args": args,
-                "ok": result.ok,
-                "output_preview": (result.output or result.error or "")[:200],
-                "simulated": result.simulated,
-            })
+            history.append(
+                {
+                    "name": name,
+                    "args": args,
+                    "ok": result.ok,
+                    "output_preview": (result.output or result.error or "")[:200],
+                    "simulated": result.simulated,
+                }
+            )
 
             # ── Re-read detection ──────────────────────────────────────────
             # Track which line ranges of each file have been read.
@@ -2004,7 +2342,7 @@ def _run_executor_impl(
                 raw_path = str(args.get("path", ""))
                 fpath = _short_path(raw_path)
                 offset = int(args.get("offset") or 1)
-                limit  = int(args.get("limit")  or 2000)
+                limit = int(args.get("limit") or 2000)
                 ranges = _read_ranges.setdefault(raw_path, [])
                 ranges.append((offset, offset + limit - 1))
                 count = len(ranges)
@@ -2019,7 +2357,10 @@ def _run_executor_impl(
                     )
                     obs_text = obs_text + note
                     lbl = "re-reading" if count == 2 else f"reading ×{count}"
-                    _ui("warn", f"  [yellow]⚠ {lbl} {fpath} — consider grep or find_symbol instead[/yellow]")
+                    _ui(
+                        "warn",
+                        f"  [yellow]⚠ {lbl} {fpath} — consider grep or find_symbol instead[/yellow]",
+                    )
 
             # ── Self-heal: fast checker after every successful write/edit ──
             # Ground truth in the same round: a syntax error or undefined name
@@ -2029,15 +2370,25 @@ def _run_executor_impl(
                 config.SELF_CHECK
                 and result.ok
                 and not result.simulated
-                and name in ("write_file", "edit_file", "create_file", "patch_file",
-                             "str_replace_editor", "str_replace")
+                and name
+                in (
+                    "write_file",
+                    "edit_file",
+                    "create_file",
+                    "patch_file",
+                    "str_replace_editor",
+                    "str_replace",
+                )
             ):
                 _checked_path = str(
-                    args.get("path") or args.get("file_path")
-                    or args.get("filename") or ""
+                    args.get("path")
+                    or args.get("file_path")
+                    or args.get("filename")
+                    or ""
                 )
                 if _checked_path:
                     from wells import checkers
+
                     check_err = checkers.quick_check(_checked_path, ctx.workspace)
                     if check_err:
                         obs_text = obs_text + (
@@ -2085,9 +2436,12 @@ def _run_executor_impl(
                             f"writing again. If you're stuck, say so instead of "
                             f"rewriting again.]"
                         )
-                        _ui("warn", f"  [bold yellow]⚠ {_drift_streak} unrelated "
-                                    f"full rewrites of {_short_path(_wpath)} in a row "
-                                    f"— model shown the original goal again[/bold yellow]")
+                        _ui(
+                            "warn",
+                            f"  [bold yellow]⚠ {_drift_streak} unrelated "
+                            f"full rewrites of {_short_path(_wpath)} in a row "
+                            f"— model shown the original goal again[/bold yellow]",
+                        )
 
             # ── Stuck-loop detection ───────────────────────────────────────
             # Inject a note into obs_text when the same command fails 3+ times
@@ -2117,7 +2471,9 @@ def _run_executor_impl(
             _ui(
                 "tool_line",
                 _activity_line(name, args, result.ok, result.simulated),
-                name=name, ok=result.ok, simulated=result.simulated,
+                name=name,
+                ok=result.ok,
+                simulated=result.simulated,
             )
 
             # Full, untruncated record of what the model actually saw — the
@@ -2126,6 +2482,7 @@ def _run_executor_impl(
             # after the fact. See the /log slash command.
             try:
                 from wells import logger as _logger
+
                 _logger.log_tool_result(name, args, result.ok, obs_text)
             except Exception:
                 pass
@@ -2147,9 +2504,12 @@ def _run_executor_impl(
                     f"{_last_call_repeat}× with no progress"
                 ):
                     break
-                _ui("warn", f"  [bold red]⛔ stuck loop — {name} repeated "
-                            f"{_last_call_repeat}× with identical args, "
-                            f"stopping the run[/bold red]")
+                _ui(
+                    "warn",
+                    f"  [bold red]⛔ stuck loop — {name} repeated "
+                    f"{_last_call_repeat}× with identical args, "
+                    f"stopping the run[/bold red]",
+                )
                 return _stopped(
                     "stuck_loop",
                     f"(stopped: {name} was called with identical arguments "
@@ -2166,11 +2526,14 @@ def _run_executor_impl(
                     f"rewrites of '{_short_path(_drift_path or '')}' in a row)"
                 ):
                     break
-                _ui("warn", f"  [bold red]⛔ task drift — {_drift_streak} "
-                            f"unrelated full rewrites of "
-                            f"{_short_path(_drift_path or '')} in a row with no "
-                            f"convergence toward the goal, stopping the "
-                            f"run[/bold red]")
+                _ui(
+                    "warn",
+                    f"  [bold red]⛔ task drift — {_drift_streak} "
+                    f"unrelated full rewrites of "
+                    f"{_short_path(_drift_path or '')} in a row with no "
+                    f"convergence toward the goal, stopping the "
+                    f"run[/bold red]",
+                )
                 return _stopped(
                     "stuck_loop",
                     f"(stopped: {_drift_streak} consecutive rewrites of "
@@ -2190,16 +2553,26 @@ def _run_executor_impl(
                 messages = _inject_wm(messages, wm)
                 final_saved = ms + ds
                 final = config._invoke_with_retry(llm, messages)
-                _account_usage(step=step_label, model=model_name, messages=messages,
-                               resp=final, saved_by_trim=final_saved)
+                _account_usage(
+                    step=step_label,
+                    model=model_name,
+                    messages=messages,
+                    resp=final,
+                    saved_by_trim=final_saved,
+                    usage_log=usage_log,
+                    round_num=rounds + 1,
+                    mask_saved=ms,
+                    drop_saved=ds,
+                )
                 messages.append(final)
                 return ExecutorResult(
                     summary=(getattr(final, "content", "") or "").strip()
-                            or "(reached step cap)",
+                    or "(reached step cap)",
                     steps_taken=steps,
                     tool_calls=history,
                     stopped_reason="max_steps",
                     messages=messages,
+                    usage_log=usage_log,
                 )
             except Exception:
                 return ExecutorResult(
@@ -2208,6 +2581,7 @@ def _run_executor_impl(
                     tool_calls=history,
                     stopped_reason="max_steps",
                     messages=messages,
+                    usage_log=usage_log,
                 )
 
     return ExecutorResult(
@@ -2272,7 +2646,7 @@ def _tail_repetition(text: str) -> bool:
     """
     if len(text) < _REP_MIN_UNIT * _REP_MIN_REPEATS:
         return False
-    tail = text[-(_REP_MAX_UNIT * _REP_MIN_REPEATS):]
+    tail = text[-(_REP_MAX_UNIT * _REP_MIN_REPEATS) :]
     max_unit = min(_REP_MAX_UNIT, len(tail) // _REP_MIN_REPEATS)
     for unit_len in range(_REP_MIN_UNIT, max_unit + 1):
         unit = tail[-unit_len:]
@@ -2320,7 +2694,7 @@ def _stream_invoke(
                     b.get("text", "") for b in content if isinstance(b, dict)
                 )
             if guard and content:
-                _buf = (_buf + content)[-(_REP_MAX_UNIT * _REP_MIN_REPEATS):]
+                _buf = (_buf + content)[-(_REP_MAX_UNIT * _REP_MIN_REPEATS) :]
                 if _tail_repetition(_buf):
                     aborted = True
                     break
