@@ -801,14 +801,14 @@ class SettingsScreen(ModalScreen["dict | None"]):
                     self._staged["MODEL_PROFILE"] = chosen
                     self._populate()
                     self._refresh_title()
-            self.push_screen(ProfileSwitchScreen(), _on_profile_picked)
+            self.app.push_screen(ProfileSwitchScreen(), _on_profile_picked)
         elif event.button.id == "btn-add-profile":
             def _on_profile_added(changes: dict | None) -> None:
                 if changes:
                     self._staged.update(changes)
                     self._populate()
                     self._refresh_title()
-            self.push_screen(ProfileAddScreen(), _on_profile_added)
+            self.app.push_screen(ProfileAddScreen(), _on_profile_added)
 
     def _refresh_title(self) -> None:
         from wells import providers as providers_mod
