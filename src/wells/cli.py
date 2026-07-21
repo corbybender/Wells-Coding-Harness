@@ -1485,14 +1485,31 @@ def _handle_mcp(arg: str) -> None:
         _mcp_list(mc)
     elif sub == "add":
         if len(parts) < 3:
-            console.print("[red]Usage: /mcp add <name> <command> [args…][/red]")
+            console.print(
+                "[red]Usage: /mcp add <name> <command> [args…]  (stdio)[/red]\n"
+                "[red]       /mcp add <name> <http(s) URL>     (http/sse)[/red]"
+            )
             return
-        name, command, args = parts[1], parts[2], parts[3:]
-        spec: dict = {"command": command}
-        if args:
-            spec["args"] = args
+        name, second, rest = parts[1], parts[2], parts[3:]
+        # Auto-route: if the second arg looks like a URL, build an HTTP/SSE
+        # spec; otherwise treat as a stdio command + args.
+        if second.startswith(("http://", "https://")):
+            spec: dict = {"url": second}
+            # Optional: `transport sse` after the URL forces the legacy SSE
+            # protocol; default is streamable-http.
+            if rest and rest[0].lower() in ("sse", "http"):
+                spec["transport"] = rest[0].lower()
+            kind_label = spec.get("transport", "http")
+        else:
+            spec = {"command": second}
+            if rest:
+                spec["args"] = rest
+            kind_label = "stdio"
         mc.add_server(name, spec)
-        console.print(f"[green]Added '{name}' to mcp.json.[/green] [dim]Connecting…[/dim]")
+        console.print(
+            f"[green]Added '{name}' ({kind_label}) to mcp.json.[/green] "
+            "[dim]Connecting…[/dim]"
+        )
         ok, msg, names = mc.connect_server(name, spec)
         if ok:
             console.print(f"[green]{name}: {msg}[/green] [dim]{', '.join(names)}[/dim]")

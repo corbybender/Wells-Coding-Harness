@@ -656,14 +656,24 @@ Exposed tools include `run_agent_task` (full loop), `plan_task`,
 
 ### Client: give Wells external tools
 
-Wells also connects *out* to stdio MCP servers (databases, docs, GitHub,
-memory banks) and registers their tools for the agent as
-`mcp_<server>_<tool>`. Configure via the **`/mcp` modal manager** in the TUI
-(add / enable / disable / test / remove — no JSON editing), the `/mcp add …`
-subcommands, or by editing `~/.wells/mcp.json` directly (created on first run
-with ready-to-enable samples: fetch, filesystem, github, postgres, sqlite,
-memory). The `MCP_SERVERS` env var (JSON) overrides the file. Every external
-call passes the safety gate, so `approve` and `dryrun` apply to MCP tools too.
+Wells also connects *out* to MCP servers (databases, docs, GitHub, memory
+banks) and registers their tools for the agent as `mcp_<server>_<tool>`.
+**Two transports are supported:**
+
+| Transport | Spec shape | Use when |
+|---|---|---|
+| **stdio** | `{"command": "...", "args": [...]}` | Local subprocess — the classic MCP servers (`uvx mcp-server-fetch`, `npx @modelcontextprotocol/server-*`) |
+| **HTTP** (streamable-http) | `{"url": "https://...", "headers": {...}}` | Remote MCP server speaking the newer spec (default when `url` is present) |
+| **SSE** (legacy) | `{"url": "https://...", "transport": "sse"}` | Remote server that only speaks the older SSE protocol |
+
+Configure via the **`/mcp` modal manager** in the TUI (add / enable /
+disable / test / remove — no JSON editing), the `/mcp add …` subcommands
+(auto-routes: a second arg starting with `http(s)://` becomes an HTTP
+server; otherwise it's stdio), or by editing `~/.wells/mcp.json` directly
+(created on first run with ready-to-enable samples: fetch, filesystem,
+github, postgres, sqlite, memory, plus HTTP/SSE templates). The
+`MCP_SERVERS` env var (JSON) overrides the file. Every external call
+passes the safety gate, so `approve` and `dryrun` apply to MCP tools too.
 
 ## Project structure
 
@@ -780,5 +790,4 @@ wheels (Linux/macOS/Windows × Python 3.12/3.13) to PyPI on an `index-v*` tag.
 
 ## Roadmap
 
-- SSE/HTTP MCP client transport (stdio today).
 - Embedding-based retrieval for very large repos.

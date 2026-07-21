@@ -1,13 +1,24 @@
 """MCP client: expose external MCP servers' tools inside the executor.
 
 Wells already *is* an MCP server (:mod:`mcp_server`); this is the other
-direction — connecting out to stdio MCP servers (databases, docs, ticket
-systems, memory banks) and registering their tools so the agent can call them
-like any built-in tool.
+direction — connecting out to MCP servers (databases, docs, ticket systems,
+memory banks) and registering their tools so the agent can call them like
+any built-in tool.
+
+Two transports are supported:
+
+  * **stdio** — local subprocess. Spec: ``{"command": "uvx",
+    "args": ["mcp-server-fetch"]}``. Existing; works everywhere.
+  * **HTTP/SSE** — remote server. Spec: ``{"url": "https://...",
+    "transport": "http" | "sse", "headers": {...}}``. ``transport`` is
+    optional (defaults to ``"http"`` — the newer MCP streamable-http spec;
+    set ``"sse"`` explicitly for servers that only speak the legacy SSE
+    protocol). ``headers`` is optional and typically carries auth.
 
 Configuration (first match wins):
   * ``MCP_SERVERS`` env var — JSON: ``{"fetch": {"command": "uvx",
-    "args": ["mcp-server-fetch"]}, ...}``
+    "args": ["mcp-server-fetch"]}, "remote": {"url": "https://...",
+    "headers": {"Authorization": "Bearer ..."}}, ...}``
   * ``~/.wells/mcp.json`` — same JSON shape.
 
 Design:
@@ -73,6 +84,18 @@ _TEMPLATE = {
             "command": "npx",
             "args": ["-y", "@modelcontextprotocol/server-memory"],
         },
+        # Remote (HTTP / SSE) servers — no local subprocess; connect over the
+        # network. `transport` defaults to "http" (the newer MCP streamable
+        # spec); set it to "sse" explicitly for servers that only speak the
+        # legacy SSE protocol. `headers` is optional and typically carries auth.
+        "remote-http": {
+            "url": "https://mcp.example.com/mcp",
+            "headers": {"Authorization": "Bearer YOUR_TOKEN"},
+        },
+        "remote-sse": {
+            "url": "https://mcp-legacy.example.com/sse",
+            "transport": "sse",
+        },
     },
 }
 
@@ -116,6 +139,38 @@ def load_config() -> dict:
         return {}
 
 
+def _transport_kind(spec: dict) -> str:
+    """Classify a server spec: 'stdio' | 'http' | 'sse'.
+
+    - ``{"command": ...}`` → stdio
+    - ``{"url": ..., "transport": "sse"|"http"}`` → that transport
+    - ``{"url": ...}`` with no explicit transport → 'http' (the newer MCP
+      streamable-http spec; SSE is the legacy variant)
+    """
+    if spec.get("url"):
+        t = (spec.get("transport") or "http").strip().lower()
+        return t if t in ("http", "sse") else "http"
+    return "stdio"
+
+
+def _validate_spec(spec: dict) -> tuple[bool, str]:
+    """Check that a spec is well-formed. Returns (ok, reason)."""
+    if not isinstance(spec, dict):
+        return False, "spec must be a dict"
+    if spec.get("url"):
+        if not isinstance(spec["url"], str) or not spec["url"].startswith(("http://", "https://")):
+            return False, f"url must be a http(s) URL (got {spec['url']!r})"
+        t = (spec.get("transport") or "http").strip().lower()
+        if t not in ("", "http", "sse"):
+            return False, f"transport must be 'http' or 'sse' (got {t!r})"
+        return True, ""
+    if spec.get("command"):
+        if not isinstance(spec["command"], str):
+            return False, "command must be a string"
+        return True, ""
+    return False, "spec needs either 'command' (stdio) or 'url' (http/sse)"
+
+
 class _Bridge:
     """Background thread that owns the asyncio loop all MCP sessions live on."""
 
@@ -137,17 +192,41 @@ class _Bridge:
     async def _open(self, name: str, spec: dict):
         from contextlib import AsyncExitStack
 
-        from mcp import ClientSession, StdioServerParameters
+        from mcp import ClientSession
         from mcp.client.stdio import stdio_client
 
-        params = StdioServerParameters(
-            command=spec["command"],
-            args=list(spec.get("args") or []),
-            env={**os.environ, **(spec.get("env") or {})},
-            cwd=spec.get("cwd"),
-        )
         stack = AsyncExitStack()
-        read, write = await stack.enter_async_context(stdio_client(params))
+        kind = _transport_kind(spec)
+        if kind == "stdio":
+            from mcp import StdioServerParameters
+
+            params = StdioServerParameters(
+                command=spec["command"],
+                args=list(spec.get("args") or []),
+                env={**os.environ, **(spec.get("env") or {})},
+                cwd=spec.get("cwd"),
+            )
+            read, write = await stack.enter_async_context(stdio_client(params))
+        elif kind == "sse":
+            from mcp.client.sse import sse_client
+
+            read, write = await stack.enter_async_context(
+                sse_client(
+                    spec["url"],
+                    headers=spec.get("headers") or None,
+                )
+            )
+        else:  # http (streamable-http)
+            from mcp.client.streamable_http import streamablehttp_client
+
+            ctx = streamablehttp_client(
+                spec["url"],
+                headers=spec.get("headers") or None,
+            )
+            # streamablehttp_client yields (read, write, get_session_id) —
+            # we don't need the third element for tool calls.
+            read, write, *_ = await stack.enter_async_context(ctx)
+
         session = await stack.enter_async_context(ClientSession(read, write))
         await session.initialize()
         self.sessions[name] = (session, stack)
@@ -230,9 +309,15 @@ def connect_server(name: str, spec: dict) -> tuple[bool, str, list[str]]:
     """Connect one server and register its tools.
 
     Returns (ok, message, registered_tool_names).
+
+    Accepts either stdio servers (``{"command": ...,
+    "args": [...]}``) or remote HTTP/SSE servers (``{"url": "...",
+    "transport": "http"|"sse", "headers": {...}}``). See
+    :func:`_validate_spec` for the exact shape.
     """
-    if not isinstance(spec, dict) or not spec.get("command"):
-        return False, "no command configured", []
+    ok, reason = _validate_spec(spec)
+    if not ok:
+        return False, reason, []
 
     from wells import tools as tools_mod
 
@@ -248,7 +333,9 @@ def connect_server(name: str, spec: dict) -> tuple[bool, str, list[str]]:
     tools_mod.register_external(defs)
     names = [d.name for d in defs]
     _REGISTERED[name] = names
-    return True, f"connected ({len(names)} tool(s))", names
+    kind = _transport_kind(spec)
+    suffix = "" if kind == "stdio" else f" ({kind})"
+    return True, f"connected{suffix} ({len(names)} tool(s))", names
 
 
 def disconnect_server(name: str) -> bool:
