@@ -254,19 +254,14 @@ _UNDO_REF = "refs/wells/undo"
 
 def _git(workspace: str, *args: str, env_extra: dict | None = None,
          timeout: int = 120) -> tuple[bool, str]:
-    """Run git directly (argv, no shell) in ``workspace``."""
-    import os
-    import subprocess
+    """Run git directly (argv, no shell) in ``workspace``.
 
-    env = {**os.environ, **(env_extra or {})}
-    try:
-        p = subprocess.run(
-            ["git", *args], cwd=workspace, capture_output=True, text=True,
-            timeout=timeout, env=env,
-        )
-    except Exception as e:
-        return False, str(e)
-    return p.returncode == 0, ((p.stdout or "") + (p.stderr or "")).strip()
+    Thin wrapper over :func:`wells._gitutils.git`. Tests and callers
+    reference ``gitops._git`` by name; this re-export keeps that contract.
+    """
+    from wells._gitutils import git as _real_git
+
+    return _real_git(workspace, *args, env_extra=env_extra, timeout=timeout)
 
 
 def snapshot_worktree(workspace: str) -> str:

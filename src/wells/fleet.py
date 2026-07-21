@@ -66,24 +66,26 @@ def _slugify(text: str, *, max_len: int = 30) -> str:
 
 
 def _git(cwd: str, *args: str, timeout: float = 60.0) -> tuple[bool, str]:
-    try:
-        proc = subprocess.run(
-            ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=timeout,
-        )
-    except Exception as e:
-        return False, f"{type(e).__name__}: {e}"
-    out = (proc.stdout or "") + (proc.stderr or "")
-    return proc.returncode == 0, out.strip()
+    """Run git directly (argv, no shell) in ``cwd``.
+
+    Thin wrapper over :func:`wells._gitutils.git` preserving the historical
+    60s default (the unified primitive uses 120s — generous for everything,
+    but fleet's worktree add/remove are quick and a runaway git op shouldn't
+    hold a fleet run for two minutes). Tests monkey-patch this name.
+    """
+    from wells._gitutils import git as _real_git
+
+    return _real_git(cwd, *args, timeout=timeout)
 
 
 def is_git_repo(path: str) -> bool:
-    ok, out = _git(path, "rev-parse", "--is-inside-work-tree")
-    return ok and "true" in out.lower()
+    from wells._gitutils import is_git_repo as _impl
+    return _impl(path)
 
 
 def current_branch(path: str) -> str:
-    ok, out = _git(path, "rev-parse", "--abbrev-ref", "HEAD")
-    return out.strip() if ok else ""
+    from wells._gitutils import current_branch as _impl
+    return _impl(path)
 
 
 # ---------------------------------------------------------------------------

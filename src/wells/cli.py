@@ -1436,6 +1436,22 @@ def _handle_doctor() -> None:
             "workspace is a git repo (/undo available)" if in_repo
             else "workspace not a git repo — /undo disabled",
         )
+        # Stray worktree reaping: a crashed process can leave orphan worktrees
+        # (from bg_start role=worktree or fleet runs) consuming disk. Prune
+        # them and report. Only relevant in a git repo.
+        if in_repo:
+            try:
+                from wells import worktree as _wt
+                reaped = _wt.reap_stray_worktrees(config.WORKSPACE_ROOT)
+                if reaped:
+                    table.add_row(
+                        "worktrees", WARN,
+                        f"pruned {reaped} stray worktree(s) left by a previous run",
+                    )
+                else:
+                    table.add_row("worktrees", OK, "no stray worktrees")
+            except Exception as e:
+                table.add_row("worktrees", WARN, f"reap check failed: {str(e)[:60]}")
     else:
         table.add_row("git", WARN, "git not on PATH — checkpoints and /undo disabled")
 

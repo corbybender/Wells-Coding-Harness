@@ -27,7 +27,6 @@ Design:
 from __future__ import annotations
 
 import re
-import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,34 +35,29 @@ BG_WORKTREES_DIR = Path.home() / ".wells" / "bg-worktrees"
 
 
 def _git(cwd: str, *args: str, timeout: float = 60.0) -> tuple[bool, str]:
-    """Run ``git`` directly (argv, no shell) in ``cwd``. Returns (ok, output)."""
-    try:
-        proc = subprocess.run(
-            ["git", *args],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except Exception as e:
-        return False, f"{type(e).__name__}: {e}"
-    out = (proc.stdout or "") + (proc.stderr or "")
-    return proc.returncode == 0, out.strip()
+    """Run ``git`` directly (argv, no shell) in ``cwd``. Returns (ok, output).
+
+    Thin wrapper over :func:`wells._gitutils.git` preserving the historical
+    60s default. Tests monkey-patch this name.
+    """
+    from wells._gitutils import git as _real_git
+
+    return _real_git(cwd, *args, timeout=timeout)
 
 
 def is_git_repo(path: str) -> bool:
-    ok, out = _git(path, "rev-parse", "--is-inside-work-tree")
-    return ok and "true" in out.lower()
+    from wells._gitutils import is_git_repo as _impl
+    return _impl(path)
 
 
 def current_branch(path: str) -> str:
-    ok, out = _git(path, "rev-parse", "--abbrev-ref", "HEAD")
-    return out.strip() if ok else ""
+    from wells._gitutils import current_branch as _impl
+    return _impl(path)
 
 
 def head_sha(path: str) -> str:
-    ok, out = _git(path, "rev-parse", "HEAD")
-    return out.strip() if ok else ""
+    from wells._gitutils import head_sha as _impl
+    return _impl(path)
 
 
 def _slugify(text: str, *, max_len: int = 30) -> str:
