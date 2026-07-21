@@ -1936,9 +1936,7 @@ class WellsApp(App[None]):
             self._start_resume_picker(arg)
             return
 
-        if cmd == "/config":
-            # settings.interactive_menu() blocks on input() — deadlocks under
-            # Textual. Open the modal settings panel instead.
+        if cmd in ("/config", "/model", "/models"):
             self._open_settings()
             return
 

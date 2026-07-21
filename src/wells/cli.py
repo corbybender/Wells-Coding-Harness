@@ -30,6 +30,16 @@ SLASH_COMMANDS: list[tuple[str, str, str]] = [
         "Edit model, provider, safety, budgets, ...",
     ),
     (
+        "/model",
+        "Open settings (alias for /config)",
+        "Same as /config — model/provider settings.",
+    ),
+    (
+        "/models",
+        "Open settings (alias for /config)",
+        "Same as /config — model/provider settings.",
+    ),
+    (
         "/info",
         "Print effective configuration",
         "Show resolved profiles, workspace, knobs.",
@@ -222,7 +232,7 @@ def handle_slash_command(command: str) -> bool:
         return False
     elif cmd == "/help":
         _print_help()
-    elif cmd == "/config":
+    elif cmd in ("/config", "/model", "/models"):
         settings.interactive_menu(Path(".env"))
         _reload_module_config()
     elif cmd == "/info":
