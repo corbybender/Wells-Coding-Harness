@@ -14,6 +14,8 @@ REM UV_NATIVE_TLS on older uv) - needed on corporate networks whose proxy
 REM presents a self-signed cert.
 
 setlocal
+REM Save the user's CWD before we cd into the repo root.
+set "USER_CWD=%CD%"
 cd /d "%~dp0"
 
 REM Use the OS certificate store so corporate TLS-intercepting proxies work.
@@ -102,6 +104,7 @@ echo.
 
 :embeddone
 set "PYTHONPATH=%~dp0src;%PYTHONPATH%"
+if not defined WORKSPACE_ROOT set "WORKSPACE_ROOT=%USER_CWD%"
 uv run --no-sync python -m wells.main %*
 goto :eof
 

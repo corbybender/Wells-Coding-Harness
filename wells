@@ -16,6 +16,9 @@
 
 set -e
 
+# Save the user's CWD before we cd into the repo root.
+USER_CWD="$(pwd)"
+
 # Resolve the directory this script lives in (the repo root), independent of CWD.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -102,4 +105,5 @@ fi
 
 # Run the harness directly from src/ — no package build, no install step.
 export PYTHONPATH="$SCRIPT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+export WORKSPACE_ROOT="${WORKSPACE_ROOT:-$USER_CWD}"
 exec uv run python -m wells.main "$@"
