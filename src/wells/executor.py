@@ -614,16 +614,13 @@ def _message_text(m: BaseMessage) -> str:
 
 
 def _account_usage(
-    *,
-    step: str,
-    model: str,
-    messages: list[BaseMessage],
-    resp: BaseMessage,
+    *, step: str, model: str, messages: list[BaseMessage], resp: BaseMessage,
     saved_by_trim: int = 0,
     usage_log: list[dict] | None = None,
     round_num: int = 0,
     mask_saved: int = 0,
     drop_saved: int = 0,
+    mask_batch: bool = False,
 ) -> None:
     """Record token usage for one executor round into the global ledger.
 
@@ -663,24 +660,12 @@ def _account_usage(
                 "cache_creation": int(cache_creation),
                 "mask_saved": int(mask_saved),
                 "drop_saved": int(drop_saved),
+                "mask_batch": bool(mask_batch),
                 # Estimated prompt size at this call — useful for correlating
                 # cache breaks with context-management events.
                 "ctx_tokens_at_call": estimate_tokens(full),
             }
         )
-    reasoning = ((um.get("output_token_details") or {}).get("reasoning")) or 0
-    cache_read = ((um.get("input_token_details") or {}).get("cache_read")) or 0
-    LEDGER.record(
-        step=step,
-        task_type="executor",
-        model=model,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        reasoning_tokens=reasoning,
-        cache_read_tokens=cache_read,
-        category_tokens={"executor_input": input_tokens},
-        saved_by_trim=saved_by_trim,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -894,6 +879,15 @@ def _rewrite_similarity(old: str, new: str) -> float:
 _MASK_KEEP_ROUNDS = int(__import__("os").environ.get("WELLS_KEEP_ROUNDS", "4"))
 # Only mask tool outputs larger than this many estimated tokens (small ones are cheap).
 _MASK_MIN_TOKENS = int(__import__("os").environ.get("WELLS_MASK_MIN", "120"))
+# Batch-stable masking: don't re-run masking until the cutoff has advanced by
+# at least this many rounds past the previous batch. Each masking run mutates
+# bytes in the middle of the prefix, which invalidates the provider's prompt
+# cache from that point forward — so doing it every round (as each new
+# message crosses the cutoff) costs N cache-breaking re-prefills. Batching
+# amortizes that: one cache break per batch, then `_MASK_BATCH_ROUNDS`
+# rounds of warm cache in between. Set to 0 or 1 to get the old per-round
+# behavior (useful for A/B comparison via `wells analyze`).
+_MASK_BATCH_ROUNDS = int(__import__("os").environ.get("WELLS_MASK_BATCH", "4"))
 # Fallback drop threshold/target — used only if neither an explicit
 # WELLS_CTX_LIMIT/TARGET override nor config.BUDGET is available (should not
 # happen in practice; config always loads). See _effective_ctx_budget().
@@ -1004,7 +998,9 @@ def _mask_tool_result(name: str, args: dict, content: str) -> str:
 def _apply_observation_masking(
     messages: list[BaseMessage],
     tool_meta: dict[str, tuple[str, dict]],
-) -> tuple[list[BaseMessage], int]:
+    *,
+    frozen_cutoff: int = 0,
+) -> tuple[list[BaseMessage], int, int, bool]:
     """Replace large ToolMessage content in old rounds with typed 1-line summaries.
 
     The JetBrains Research finding (NeurIPS 2025 DL4C): masking beats naive drop
@@ -1018,13 +1014,31 @@ def _apply_observation_masking(
     - Tool results under _MASK_MIN_TOKENS (cheap to keep)
     - Index tool results (already compact)
 
-    Returns (new_messages, estimated_tokens_saved).
+    **Batch-stable**: only re-masks when the current cutoff has advanced past
+    ``frozen_cutoff`` by at least ``_MASK_BATCH_ROUNDS`` rounds. Each masking
+    pass mutates bytes in the middle of the prefix and invalidates the
+    provider's prompt cache from the first mutation onward — batching
+    amortizes that cache break across several rounds instead of paying it
+    every round (the old behavior, when ``_MASK_BATCH_ROUNDS`` was effectively
+    1). The caller stores the returned ``new_frozen_cutoff`` and passes it
+    back on the next call.
+
+    Returns ``(new_messages, estimated_tokens_saved, new_frozen_cutoff,
+    batch_fired)``. When ``batch_fired`` is False, the messages are returned
+    unchanged and ``new_frozen_cutoff`` echoes ``frozen_cutoff``.
     """
     ai_positions = [i for i, m in enumerate(messages) if isinstance(m, AIMessage)]
     if len(ai_positions) <= _MASK_KEEP_ROUNDS:
-        return messages, 0
+        return messages, 0, frozen_cutoff, False
 
     cutoff = ai_positions[-_MASK_KEEP_ROUNDS]  # mask everything before this index
+
+    # Batch gate: don't re-mask unless the cutoff has advanced past the
+    # frozen prefix by at least _MASK_BATCH_ROUNDS rounds. Within a batch
+    # window, the transcript is append-only relative to the last mask —
+    # the provider's prompt cache stays warm.
+    if _MASK_BATCH_ROUNDS > 0 and (cutoff - frozen_cutoff) < _MASK_BATCH_ROUNDS:
+        return messages, 0, frozen_cutoff, False
 
     result = list(messages)
     saved = 0
@@ -1038,7 +1052,9 @@ def _apply_observation_masking(
             )
         if estimate_tokens(content) <= _MASK_MIN_TOKENS:
             continue
-        # Skip if already a 1-liner summary
+        # Skip if already a 1-liner summary (this is how already-masked
+        # messages from a previous batch stay frozen — the per-message
+        # guard means we never pay to re-mask what's already compact).
         if content.startswith("[") and "\n" not in content.strip():
             continue
         name, args = tool_meta.get(m.tool_call_id or "", ("", {}))
@@ -1048,7 +1064,7 @@ def _apply_observation_masking(
             content=masked, tool_call_id=m.tool_call_id, name=m.name
         )
 
-    return result, max(0, saved)
+    return result, max(0, saved), cutoff, True
 
 
 def _safety_drop(
@@ -1496,6 +1512,12 @@ def _run_executor_impl(
     _file_write_history: dict[str, str] = {}  # path → most recent full content written
     _drift_streak = 0  # consecutive low-similarity full rewrites of one path
     _drift_path: str | None = None
+    # Batch-stable masking: the cutoff position the last time masking fired.
+    # The next batch won't fire until the cutoff has advanced past this by
+    # _MASK_BATCH_ROUNDS, so the provider's prompt cache stays warm between
+    # batches instead of being invalidated every round.
+    _mask_frozen_cutoff = 0
+    _mask_batch_this_round = False
     _readonly_names = {t.name for t in toolset if not t.mutating}
     # Read-only dedupe cache: call_key → (round, step) of the last execution.
     # Cleared whenever a mutating call succeeds (conservative: any write may
@@ -1650,9 +1672,20 @@ def _run_executor_impl(
         # the trim target). Below the target the transcript is append-only,
         # keeping the whole prefix cached (Ollama KV cache / cloud prompt
         # caching): the cheapest tokens are the ones never re-prefilled.
+        #
+        # Batch-stable masking: even above the trim target, masking now
+        # fires in batches (see _apply_observation_masking) — one mutation
+        # pass per _MASK_BATCH_ROUNDS rounds, then the cache stays warm
+        # until the next batch. Drop is unchanged: still last-resort per
+        # round when over threshold.
         mask_saved = drop_saved = 0
+        _mask_batch_this_round = False
         if _ctx_tokens(messages) > ctx_drop_target:
-            messages, mask_saved = _apply_observation_masking(messages, _tool_meta)
+            messages, mask_saved, _mask_frozen_cutoff, _mask_batch_this_round = (
+                _apply_observation_masking(
+                    messages, _tool_meta, frozen_cutoff=_mask_frozen_cutoff,
+                )
+            )
             messages, drop_saved = _safety_drop(
                 messages, threshold=ctx_drop_threshold, target=ctx_drop_target
             )
@@ -1723,6 +1756,7 @@ def _run_executor_impl(
             round_num=rounds,
             mask_saved=mask_saved,
             drop_saved=drop_saved,
+            mask_batch=_mask_batch_this_round,
         )
         messages.append(resp)
 
@@ -2546,7 +2580,9 @@ def _run_executor_impl(
             try:
                 ms = ds = 0
                 if _ctx_tokens(messages) > ctx_drop_target:
-                    messages, ms = _apply_observation_masking(messages, _tool_meta)
+                    messages, ms, _mask_frozen_cutoff, _ = _apply_observation_masking(
+                        messages, _tool_meta, frozen_cutoff=_mask_frozen_cutoff,
+                    )
                     messages, ds = _safety_drop(
                         messages, threshold=ctx_drop_threshold, target=ctx_drop_target
                     )

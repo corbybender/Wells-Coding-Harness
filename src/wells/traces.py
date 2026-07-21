@@ -293,8 +293,10 @@ def analyze_trace(trace_path: str | Path) -> dict:
         eff = _cache_efficiency(e)
         cache_effs.append(eff)
         ctx_op = ""
+        if e.get("mask_batch"):
+            ctx_op = "BATCH"
         if e.get("mask_saved"):
-            ctx_op += f"mask-{e['mask_saved']}"
+            ctx_op += ("/" if ctx_op else "") + f"mask-{e['mask_saved']}"
         if e.get("drop_saved"):
             ctx_op += ("/" if ctx_op else "") + f"drop-{e['drop_saved']}"
         per_call.append(
@@ -309,6 +311,7 @@ def analyze_trace(trace_path: str | Path) -> dict:
                 "cache_efficiency": round(eff, 3),
                 "ctx_tokens_at_call": e.get("ctx_tokens_at_call", 0),
                 "ctx_op": ctx_op,
+                "mask_batch": bool(e.get("mask_batch")),
             }
         )
 
@@ -321,6 +324,7 @@ def analyze_trace(trace_path: str | Path) -> dict:
         "cache_creation": sum(e.get("cache_creation", 0) for e in usage),
         "mask_saved": sum(e.get("mask_saved", 0) for e in usage),
         "drop_saved": sum(e.get("drop_saved", 0) for e in usage),
+        "mask_batches": sum(1 for e in usage if e.get("mask_batch")),
     }
     totals["cache_efficiency"] = round(
         totals["cache_read"] / max(1, totals["input"] + totals["cache_read"]), 3

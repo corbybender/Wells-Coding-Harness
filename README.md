@@ -738,6 +738,7 @@ wells-index/           # Rust structural indexer (tree-sitter + SQLite)
 | `WELLS_OPEN_PR` | `0` | When `1`, the finisher pushes + opens a PR via `gh` |
 | `WELLS_PRINCIPLES` | _(bundled)_ | Path to a custom AGENT.md constitution |
 | `BLOCKED_COMMANDS` | _(see source)_ | `\|`-separated regex patterns always refused |
+| `WELLS_MASK_BATCH` | `4` | Batch-stable masking: don't re-mask until the cutoff has advanced this many rounds past the last batch (0 = mask every round, the old behavior) |
 | `WELLS_SKILLS` | `1` | Discover `skills/<name>/SKILL.md` and expose `load_skill` (on/off) |
 | `WELLS_SKILLS_PATHS` | _(blank)_ | Extra skill search dirs (path-separator list) |
 | `WELLS_CODEACT` | `1` | Expose the sandboxed `run_code` tool for in-context computation |
@@ -755,6 +756,7 @@ profile.
 | **Estimator + Ledger** | tiktoken-based, auto-calibrated; thread-safe per-step actuals from `usage_metadata` |
 | **Dollar pricing** | Live cost in the status bar and run footers |
 | **Observation masking** | Old tool outputs compressed to typed one-liners; AI reasoning turns kept verbatim |
+| **Batch-stable masking** | Masking fires in batches (`_MASK_BATCH_ROUNDS`), so the provider's prompt cache stays warm between batches instead of being invalidated every round. `wells analyze` reports cache breaks round-by-round |
 | **Working memory** | Compact structured state (files read/modified, failed approaches, test status) injected every round — prevents re-reads and repeated failures |
 | **Repo map** | Goal-ranked structure injection — fewer discovery steps |
 | **Deterministic gates** | Real test runs and fast checkers replace LLM judgment calls where possible |
@@ -779,5 +781,4 @@ wheels (Linux/macOS/Windows × Python 3.12/3.13) to PyPI on an `index-v*` tag.
 ## Roadmap
 
 - SSE/HTTP MCP client transport (stdio today).
-- Prompt-cache-friendly masking batches (measure `cache_read` deltas first).
 - Embedding-based retrieval for very large repos.
