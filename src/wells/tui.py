@@ -48,6 +48,14 @@ _HISTORY_FILE = Path.home() / ".wells" / "history.json"
 _HISTORY_MAX = 200
 _UI_PREFS_FILE = Path.home() / ".wells" / "ui.json"
 
+# Canonical graph node order (mirrors wells.cli._next_graph_node). architect
+# and summarizer are conditional branches — they render dim/pending like any
+# other not-yet-reached step until the run actually takes that path.
+_PIPELINE_STEPS = [
+    "indexer", "planner", "architect", "coder",
+    "tester", "reviewer", "summarizer", "finisher",
+]
+
 # ---------------------------------------------------------------------------
 # CSS
 # ---------------------------------------------------------------------------
@@ -373,18 +381,29 @@ class InfoPanel(Static):
                 L.append(f"[magenta]{act[:31]}[/magenta]{age_s}")
             L.append("[dim]esc: cancel · /steer · /btw[/dim]")
 
-        # -- orchestrate pipeline breadcrumb ---------------------------------------
+        # -- Chat state vs full Orchestration step list ----------------------------
+        # Always renders one of two states, never blank: a plain "chat" line
+        # when idle, or the complete pipeline with the in-flight step highlighted.
+        L.append(rule)
         stages = CONTROL.stages()
-        if stages:
-            L.append(rule)
-            L.append("[bold]pipeline[/bold]")
-            for name, status, secs_f in stages[-8:]:
+        stage_status = {name: (status, secs_f) for name, status, secs_f in stages}
+        orchestrating = bool(stages) or _cli._REPL_STATE.get("force_mode") == "task"
+        if not orchestrating:
+            L.append("[bold]○ chat[/bold] [dim](no orchestration)[/dim]")
+        else:
+            L.append("[bold]▸ orchestration[/bold]")
+            for name in _PIPELINE_STEPS:
+                st = stage_status.get(name)
+                if st is None:
+                    L.append(f"  [dim]○ {name:<14}[/dim]")
+                    continue
+                status, secs_f = st
                 if status == "run":
-                    L.append(f"[yellow]▶[/yellow] {name[:14]:<14}[yellow]{int(secs_f)}s[/yellow]")
+                    L.append(f"  [yellow]▶ {name:<14}{int(secs_f)}s[/yellow]")
                 elif status == "fail":
-                    L.append(f"[red]✗[/red] [dim]{name[:14]:<14}{int(secs_f)}s[/dim]")
+                    L.append(f"  [red]✗ {name:<14}[/red][dim]{int(secs_f)}s[/dim]")
                 else:
-                    L.append(f"[green]✓[/green] [dim]{name[:14]:<14}{int(secs_f)}s[/dim]")
+                    L.append(f"  [green]✓ {name:<14}[/green][dim]{int(secs_f)}s[/dim]")
 
         # -- per-stage step progress (cap 0 = No Limit) ----------------------------
         prog = CONTROL.progress()
