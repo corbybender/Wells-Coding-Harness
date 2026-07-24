@@ -459,7 +459,7 @@ class InfoPanel(Static):
             pass
 
         L.append(rule)
-        L.append("[dim]F2: hide (full-width select/copy)[/dim]")
+        L.append("[dim]F2: hide (full-width select/copy) · F4: paste image[/dim]")
         return "\n".join(L)
 
 
@@ -470,12 +470,13 @@ class InfoPanel(Static):
 class PromptInput(TextArea):
     """Multi-line prompt. Enter submits; Shift+Enter / Ctrl+J inserts a newline.
 
-    Ctrl+Shift+V stages a clipboard image (same as ``/paste-image``). Plain
-    Ctrl+V is left to TextArea's normal text paste — most terminals (Windows
-    Terminal included) intercept Ctrl+V themselves to convert clipboard text
-    into a paste event, and swallow it entirely (no event reaches the app at
-    all) when the clipboard holds an image instead of text. Ctrl+Shift+V
-    isn't claimed by the terminal, so the keystroke actually arrives here.
+    F4 stages a clipboard image (same as ``/paste-image``). Plain Ctrl+V is
+    left to TextArea's normal text paste — terminals (Windows Terminal
+    included) intercept Ctrl+V *and* Ctrl+Shift+V themselves as their own
+    "paste" keybinding, converting clipboard text into a paste event, and
+    swallow the keystroke entirely (no event reaches the app at all) when
+    the clipboard holds an image instead of text. A bare function key isn't
+    claimed by the terminal, so F4 actually arrives here.
 
     Up on the first line / Down on the last line scroll the prompt history
     (handled by the app via :class:`HistoryScroll`).
@@ -518,10 +519,12 @@ class PromptInput(TextArea):
         self._last_key_at = now
         in_burst = self._burst_len >= 2  # a real paste-as-keys run, not one stray fast pair
 
-        if key == "ctrl+shift+v":
-            # Not claimed by the terminal (unlike plain ctrl+v), so the key
-            # actually reaches the app even when the clipboard holds an image.
-            # A blocking OS shellout, so it runs off-thread.
+        if key == "f4":
+            # A bare function key isn't claimed by the terminal (unlike
+            # ctrl+v/ctrl+shift+v, both aliased to "paste" by Windows
+            # Terminal and others), so the key actually reaches the app even
+            # when the clipboard holds an image. A blocking OS shellout, so
+            # it runs off-thread.
             event.stop()
             event.prevent_default()
             from wells import vision
@@ -1733,7 +1736,7 @@ class WellsApp(App[None]):
             "Use [bold]/orchestrate[/bold] for complex multi-component work. "
             "Type [bold]/[/bold] for all commands. "
             "[dim]Shift+Enter: newline · ↑/↓: history · Esc: cancel run · "
-            "F2: hide panel to select/copy text[/dim]\n"
+            "F2: hide panel to select/copy text · F4: paste clipboard image[/dim]\n"
         )
 
     def _ensure_repo_index(self) -> None:

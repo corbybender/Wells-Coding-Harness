@@ -190,7 +190,10 @@ SLASH_COMMANDS: list[tuple[str, str, str]] = [
         "/paste-image",
         "Attach the clipboard image to the next task",
         "Grabs an image from the system clipboard (if any) and stages it "
-        "like /image — take a screenshot, then run this.",
+        "like /image — take a screenshot, then run this. In the TUI, F4 "
+        "does the same thing (Ctrl+V doesn't work: terminals intercept it "
+        "as their own paste keybinding and swallow it when the clipboard "
+        "holds an image instead of text).",
     ),
 ]
 
