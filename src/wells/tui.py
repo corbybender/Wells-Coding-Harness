@@ -23,6 +23,7 @@ be killed, so the input stays disabled until the worker actually exits.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import sys
@@ -469,6 +470,9 @@ class InfoPanel(Static):
 class PromptInput(TextArea):
     """Multi-line prompt. Enter submits; Shift+Enter / Ctrl+J inserts a newline.
 
+    Ctrl+V checks the system clipboard for an image first (staged like
+    ``/paste-image``) before falling back to TextArea's normal text paste.
+
     Up on the first line / Down on the last line scroll the prompt history
     (handled by the app via :class:`HistoryScroll`).
 
@@ -509,6 +513,25 @@ class PromptInput(TextArea):
         gap = now - self._last_key_at
         self._last_key_at = now
         in_burst = self._burst_len >= 2  # a real paste-as-keys run, not one stray fast pair
+
+        if key == "ctrl+v":
+            # Check the system clipboard for an image before falling through
+            # to TextArea's own ctrl+v binding (text-only paste from
+            # app.clipboard). A blocking OS shellout, so it runs off-thread.
+            from wells import vision
+            img_path = await asyncio.to_thread(vision.paste_clipboard_image)
+            if img_path is not None:
+                event.stop()
+                event.prevent_default()
+                import wells.cli as _cli
+                _cli._REPL_STATE["pending_images"].append(str(img_path))
+                n = len(_cli._REPL_STATE["pending_images"])
+                self.app.write_log(
+                    f"[dim]📎 image pasted from clipboard "
+                    f"({n} attached — sent on your next message)[/dim]"
+                )
+                return
+            # No image on the clipboard — fall through to normal text paste.
 
         if key == "enter":
             if gap < self._PASTE_BURST_GAP and in_burst:
