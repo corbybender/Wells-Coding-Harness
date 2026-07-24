@@ -470,8 +470,12 @@ class InfoPanel(Static):
 class PromptInput(TextArea):
     """Multi-line prompt. Enter submits; Shift+Enter / Ctrl+J inserts a newline.
 
-    Ctrl+V checks the system clipboard for an image first (staged like
-    ``/paste-image``) before falling back to TextArea's normal text paste.
+    Ctrl+Shift+V stages a clipboard image (same as ``/paste-image``). Plain
+    Ctrl+V is left to TextArea's normal text paste — most terminals (Windows
+    Terminal included) intercept Ctrl+V themselves to convert clipboard text
+    into a paste event, and swallow it entirely (no event reaches the app at
+    all) when the clipboard holds an image instead of text. Ctrl+Shift+V
+    isn't claimed by the terminal, so the keystroke actually arrives here.
 
     Up on the first line / Down on the last line scroll the prompt history
     (handled by the app via :class:`HistoryScroll`).
@@ -514,24 +518,25 @@ class PromptInput(TextArea):
         self._last_key_at = now
         in_burst = self._burst_len >= 2  # a real paste-as-keys run, not one stray fast pair
 
-        if key == "ctrl+v":
-            # Check the system clipboard for an image before falling through
-            # to TextArea's own ctrl+v binding (text-only paste from
-            # app.clipboard). A blocking OS shellout, so it runs off-thread.
+        if key == "ctrl+shift+v":
+            # Not claimed by the terminal (unlike plain ctrl+v), so the key
+            # actually reaches the app even when the clipboard holds an image.
+            # A blocking OS shellout, so it runs off-thread.
+            event.stop()
+            event.prevent_default()
             from wells import vision
             img_path = await asyncio.to_thread(vision.paste_clipboard_image)
-            if img_path is not None:
-                event.stop()
-                event.prevent_default()
-                import wells.cli as _cli
-                _cli._REPL_STATE["pending_images"].append(str(img_path))
-                n = len(_cli._REPL_STATE["pending_images"])
-                self.app.write_log(
-                    f"[dim]📎 image pasted from clipboard "
-                    f"({n} attached — sent on your next message)[/dim]"
-                )
+            if img_path is None:
+                self.app.write_log("[dim]No image on the clipboard.[/dim]")
                 return
-            # No image on the clipboard — fall through to normal text paste.
+            import wells.cli as _cli
+            _cli._REPL_STATE["pending_images"].append(str(img_path))
+            n = len(_cli._REPL_STATE["pending_images"])
+            self.app.write_log(
+                f"[dim]📎 image pasted from clipboard "
+                f"({n} attached — sent on your next message)[/dim]"
+            )
+            return
 
         if key == "enter":
             if gap < self._PASTE_BURST_GAP and in_burst:
